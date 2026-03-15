@@ -2,6 +2,24 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import TradingViewChart, { TIME_RANGES } from "@/components/TradingViewChart";
+import {
+  DndContext,
+  DragOverlay,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragStartEvent,
+  type DragEndEvent,
+  type DragOverEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+  arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 // --- Types & Constants ---
 
@@ -292,6 +310,243 @@ function AddMenu({
   );
 }
 
+// --- Sortable Item Component ---
+function SortableWatchlistItem({
+  item,
+  itemId,
+  groupId,
+  displayNames,
+  editingId,
+  setEditingId,
+  onSelect,
+  onUpdateDisplayName,
+  onRemoveItem,
+  onContextMenu,
+  isDragOverlay,
+}: {
+  item: WatchlistItem;
+  itemId: string;
+  groupId: string;
+  displayNames: Record<string, string>;
+  editingId: string | null;
+  setEditingId: (id: string | null) => void;
+  onSelect: (symbol: string) => void;
+  onUpdateDisplayName: (groupId: string, itemIndex: number, newName: string) => void;
+  onRemoveItem: (groupId: string, itemIndex: number) => void;
+  onContextMenu: (e: React.MouseEvent, groupId: string, itemIndex: number) => void;
+  isDragOverlay?: boolean;
+}) {
+  const itemIndex = parseInt(itemId.split(":")[1], 10);
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: itemId });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.3 : 1,
+  };
+
+  const label =
+    item.displayName ||
+    displayNames[item.symbol] ||
+    item.name ||
+    item.symbol;
+  const isEditing = editingId === item.symbol && !isDragOverlay;
+
+  return (
+    <div
+      ref={isDragOverlay ? undefined : setNodeRef}
+      style={isDragOverlay ? { opacity: 0.9 } : style}
+      className={`group flex cursor-pointer items-center gap-1 py-1.5 pl-1 pr-3 hover:bg-[#2a2e39] ${
+        isDragOverlay ? "rounded border border-blue-500/50 bg-[#1e222d] shadow-lg" : ""
+      }`}
+      onClick={() => {
+        if (!isEditing && !isDragOverlay) onSelect(item.symbol);
+      }}
+      onContextMenu={(e) => {
+        if (!isDragOverlay) onContextMenu(e, groupId, itemIndex);
+      }}
+    >
+      {/* Drag handle */}
+      <span
+        className={`flex-shrink-0 cursor-grab text-[10px] text-zinc-600 active:cursor-grabbing ${
+          isDragOverlay ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+        }`}
+        {...(isDragOverlay ? {} : { ...attributes, ...listeners })}
+        onClick={(e) => e.stopPropagation()}
+      >
+        ⠿
+      </span>
+      <div className="min-w-0 flex-1">
+        {isEditing ? (
+          <input
+            autoFocus
+            defaultValue={label}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") {
+                const val = (e.target as HTMLInputElement).value.trim();
+                if (val) onUpdateDisplayName(groupId, itemIndex, val);
+                setEditingId(null);
+              }
+              if (e.key === "Escape") setEditingId(null);
+            }}
+            onBlur={(e) => {
+              const val = e.target.value.trim();
+              if (val && val !== label) onUpdateDisplayName(groupId, itemIndex, val);
+              setEditingId(null);
+            }}
+            className="h-5 w-full rounded border border-blue-500 bg-[#131722] px-1 text-xs text-zinc-200 outline-none"
+          />
+        ) : (
+          <>
+            <div
+              className="truncate text-xs font-medium text-zinc-200 hover:text-blue-400"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!isDragOverlay) setEditingId(item.symbol);
+              }}
+              title="クリックして名前を編集 / 右クリックでメニュー"
+              style={{ cursor: "text" }}
+            >
+              {label}
+            </div>
+            {label !== item.symbol && (
+              <div className="truncate text-[10px] text-zinc-500">
+                {item.symbol}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      {!isDragOverlay && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemoveItem(groupId, itemIndex);
+          }}
+          className="hidden text-xs text-zinc-500 hover:text-red-400 group-hover:block"
+          title="削除"
+        >
+          ✕
+        </button>
+      )}
+    </div>
+  );
+}
+
+// --- Sortable Group Header ---
+function SortableGroupHeader({
+  group,
+  isCollapsed,
+  isEditingGroup,
+  setEditingGroupId,
+  onToggleGroup,
+  setAddingToGroupId,
+  onRenameGroup,
+  onContextMenu,
+}: {
+  group: WatchlistGroup;
+  isCollapsed: boolean;
+  isEditingGroup: boolean;
+  setEditingGroupId: (id: string | null) => void;
+  onToggleGroup: (id: string) => void;
+  setAddingToGroupId: (id: string) => void;
+  onRenameGroup: (id: string, name: string) => void;
+  onContextMenu: (e: React.MouseEvent, groupId: string) => void;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: `group:${group.id}` });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.3 : 1,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="group flex cursor-pointer items-center gap-1 border-b border-zinc-700/50 bg-[#1a1e2e] px-2 py-1.5 hover:bg-[#252932]"
+      onClick={() => onToggleGroup(group.id)}
+      onContextMenu={(e) => onContextMenu(e, group.id)}
+    >
+      {/* Drag handle for group */}
+      <span
+        className="flex-shrink-0 cursor-grab text-[10px] text-zinc-600 opacity-0 active:cursor-grabbing group-hover:opacity-100"
+        {...attributes}
+        {...listeners}
+        onClick={(e) => e.stopPropagation()}
+      >
+        ⠿
+      </span>
+      <span className="text-[10px] text-zinc-500">
+        {isCollapsed ? "▶" : "▼"}
+      </span>
+      {isEditingGroup ? (
+        <input
+          autoFocus
+          defaultValue={group.name}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") {
+              const val = (e.target as HTMLInputElement).value.trim();
+              if (val) onRenameGroup(group.id, val);
+              setEditingGroupId(null);
+            }
+            if (e.key === "Escape") setEditingGroupId(null);
+          }}
+          onBlur={(e) => {
+            const val = e.target.value.trim();
+            if (val && val !== group.name) onRenameGroup(group.id, val);
+            setEditingGroupId(null);
+          }}
+          className="h-5 min-w-0 flex-1 rounded border border-blue-500 bg-[#131722] px-1 text-xs text-zinc-200 outline-none"
+        />
+      ) : (
+        <span
+          className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-400"
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            setEditingGroupId(group.id);
+          }}
+          title="ダブルクリックで名前を編集 / 右クリックでメニュー"
+        >
+          {group.name}
+          <span className="ml-1 text-[10px] text-zinc-600">
+            ({group.items.length})
+          </span>
+        </span>
+      )}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          setAddingToGroupId(group.id);
+        }}
+        className="hidden rounded px-1 text-xs text-zinc-500 hover:bg-[#363a45] hover:text-white group-hover:block"
+        title="このグループに銘柄を追加"
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
 // --- Watchlist Sidebar ---
 
 function WatchlistSidebar({
@@ -302,6 +557,8 @@ function WatchlistSidebar({
   onRemoveItem,
   onUpdateDisplayName,
   onMoveItem,
+  onReorderItem,
+  onReorderGroups,
   onToggleGroup,
   onRenameGroup,
   onDeleteGroup,
@@ -317,6 +574,8 @@ function WatchlistSidebar({
   onRemoveItem: (groupId: string, itemIndex: number) => void;
   onUpdateDisplayName: (groupId: string, itemIndex: number, newName: string) => void;
   onMoveItem: (fromGroupId: string, itemIndex: number, toGroupId: string) => void;
+  onReorderItem: (groupId: string, fromIndex: number, toIndex: number) => void;
+  onReorderGroups: (fromIndex: number, toIndex: number) => void;
   onToggleGroup: (groupId: string) => void;
   onRenameGroup: (groupId: string, newName: string) => void;
   onDeleteGroup: (groupId: string) => void;
@@ -341,11 +600,118 @@ function WatchlistSidebar({
     groupId: string;
     itemIndex?: number;
   } | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [overGroupId, setOverGroupId] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const topMenuBtnRef = useRef<HTMLButtonElement | null>(null);
 
   // All items flattened for duplicate checking
   const allItems = groups.flatMap((g) => g.items);
+
+  // dnd-kit sensors - require 5px move before starting drag
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+  );
+
+  // Generate unique item IDs: "groupId:index"
+  const getItemId = (groupId: string, index: number) => `${groupId}:${index}`;
+  const parseItemId = (id: string) => {
+    const parts = id.split(":");
+    return { groupId: parts[0], index: parseInt(parts[1], 10) };
+  };
+
+  // All sortable IDs (groups + items)
+  const groupIds = groups.map((g) => `group:${g.id}`);
+
+  const handleDragStart = (event: DragStartEvent) => {
+    setActiveId(event.active.id as string);
+  };
+
+  const handleDragOver = (event: DragOverEvent) => {
+    const { active, over } = event;
+    if (!over) {
+      setOverGroupId(null);
+      return;
+    }
+
+    const activeIdStr = active.id as string;
+    const overIdStr = over.id as string;
+
+    // Only highlight group for item drags
+    if (activeIdStr.startsWith("group:")) {
+      setOverGroupId(null);
+      return;
+    }
+
+    // Find what group the over target belongs to
+    if (overIdStr.startsWith("group:")) {
+      setOverGroupId(overIdStr.replace("group:", ""));
+    } else {
+      const { groupId } = parseItemId(overIdStr);
+      setOverGroupId(groupId);
+    }
+  };
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    setActiveId(null);
+    setOverGroupId(null);
+
+    if (!over) return;
+
+    const activeIdStr = active.id as string;
+    const overIdStr = over.id as string;
+
+    // --- Group reordering ---
+    if (activeIdStr.startsWith("group:") && overIdStr.startsWith("group:")) {
+      const fromGroupId = activeIdStr.replace("group:", "");
+      const toGroupId = overIdStr.replace("group:", "");
+      if (fromGroupId !== toGroupId) {
+        const fromIdx = groups.findIndex((g) => g.id === fromGroupId);
+        const toIdx = groups.findIndex((g) => g.id === toGroupId);
+        if (fromIdx !== -1 && toIdx !== -1) {
+          onReorderGroups(fromIdx, toIdx);
+        }
+      }
+      return;
+    }
+
+    // --- Item drag ---
+    if (activeIdStr.startsWith("group:")) return; // group dragged onto item, ignore
+
+    const activeData = parseItemId(activeIdStr);
+
+    // Dropped on a group header
+    if (overIdStr.startsWith("group:")) {
+      const targetGroupId = overIdStr.replace("group:", "");
+      if (activeData.groupId !== targetGroupId) {
+        onMoveItem(activeData.groupId, activeData.index, targetGroupId);
+      }
+      return;
+    }
+
+    // Dropped on another item
+    const overData = parseItemId(overIdStr);
+
+    if (activeData.groupId === overData.groupId) {
+      // Same group: reorder
+      if (activeData.index !== overData.index) {
+        onReorderItem(activeData.groupId, activeData.index, overData.index);
+      }
+    } else {
+      // Different group: move
+      onMoveItem(activeData.groupId, activeData.index, overData.groupId);
+    }
+  };
+
+  // Find active item for DragOverlay
+  const getActiveItem = (): { item: WatchlistItem; groupId: string; itemId: string } | null => {
+    if (!activeId || activeId.startsWith("group:")) return null;
+    const { groupId, index } = parseItemId(activeId);
+    const group = groups.find((g) => g.id === groupId);
+    if (!group || !group.items[index]) return null;
+    return { item: group.items[index], groupId, itemId: activeId };
+  };
 
   // Debounced search
   const doSearch = useCallback(async (query: string) => {
@@ -505,7 +871,6 @@ function WatchlistSidebar({
     // Item context menu: flat list with move targets + separator + delete
     const menuItems: ContextMenuItem[] = [];
 
-    // Move to group options
     groups.forEach((g) => {
       const isCurrent = g.id === contextMenu.groupId;
       menuItems.push({
@@ -519,7 +884,6 @@ function WatchlistSidebar({
       });
     });
 
-    // Separator + delete
     menuItems.push({
       label: "削除",
       separator: true,
@@ -532,6 +896,8 @@ function WatchlistSidebar({
 
     return menuItems;
   };
+
+  const activeItemData = getActiveItem();
 
   return (
     <>
@@ -571,7 +937,6 @@ function WatchlistSidebar({
             <AddMenu
               anchorRef={topMenuBtnRef}
               onAddSymbol={() => {
-                // Focus the first group's add
                 setAddingToGroupId(groups[0]?.id || null);
               }}
               onAddGroup={() => setAddingNewGroup(true)}
@@ -590,20 +955,14 @@ function WatchlistSidebar({
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   const val = (e.target as HTMLInputElement).value.trim();
-                  if (val) {
-                    onAddGroup(val);
-                  }
+                  if (val) onAddGroup(val);
                   setAddingNewGroup(false);
                 }
-                if (e.key === "Escape") {
-                  setAddingNewGroup(false);
-                }
+                if (e.key === "Escape") setAddingNewGroup(false);
               }}
               onBlur={(e) => {
                 const val = e.target.value.trim();
-                if (val) {
-                  onAddGroup(val);
-                }
+                if (val) onAddGroup(val);
                 setAddingNewGroup(false);
               }}
             />
@@ -631,7 +990,6 @@ function WatchlistSidebar({
               className="h-7 w-full rounded border border-zinc-600 bg-[#131722] px-2 text-xs text-zinc-200 outline-none focus:border-blue-500"
             />
 
-            {/* Search suggestions dropdown */}
             {showSuggestions && (
               <div className="absolute left-3 right-3 z-30 rounded border border-zinc-600 bg-[#1a1e2e] shadow-lg" style={{ top: "calc(100% - 4px)" }}>
                 {suggestions.map((s, i) => {
@@ -644,36 +1002,23 @@ function WatchlistSidebar({
                       onClick={() => handleSuggestionClick(s)}
                       disabled={exists}
                       className={`flex w-full items-start gap-2 px-2 py-1.5 text-left ${
-                        exists
-                          ? "cursor-default opacity-40"
-                          : "hover:bg-[#2a2e39]"
+                        exists ? "cursor-default opacity-40" : "hover:bg-[#2a2e39]"
                       } ${i > 0 ? "border-t border-zinc-700/50" : ""}`}
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1">
-                          <span className="text-[11px] font-medium text-blue-400">
-                            {s.symbol}
-                          </span>
-                          {exists && (
-                            <span className="text-[9px] text-zinc-500">
-                              追加済
-                            </span>
-                          )}
+                          <span className="text-[11px] font-medium text-blue-400">{s.symbol}</span>
+                          {exists && <span className="text-[9px] text-zinc-500">追加済</span>}
                         </div>
-                        <div className="truncate text-[10px] text-zinc-400">
-                          {s.name}
-                        </div>
+                        <div className="truncate text-[10px] text-zinc-400">{s.name}</div>
                       </div>
-                      <span className="shrink-0 text-[9px] text-zinc-600">
-                        {s.exchange}
-                      </span>
+                      <span className="shrink-0 text-[9px] text-zinc-600">{s.exchange}</span>
                     </button>
                   );
                 })}
               </div>
             )}
 
-            {/* Searching indicator */}
             {searching && searchQuery.trim().length >= 2 && (
               <div className="absolute left-3 right-3 z-30 rounded border border-zinc-600 bg-[#1a1e2e] px-2 py-2 text-[10px] text-zinc-500 shadow-lg" style={{ top: "calc(100% - 4px)" }}>
                 検索中...
@@ -691,173 +1036,86 @@ function WatchlistSidebar({
           </div>
         )}
 
-        {/* Groups */}
+        {/* Groups with DnD */}
         <div className="flex-1 overflow-y-auto">
-          {groups.map((group) => {
-            const isCollapsed = collapsedGroups.includes(group.id);
-            const isEditingGroup = editingGroupId === group.id;
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragStart={handleDragStart}
+            onDragOver={handleDragOver}
+            onDragEnd={handleDragEnd}
+          >
+            <SortableContext items={groupIds} strategy={verticalListSortingStrategy}>
+              {groups.map((group) => {
+                const isCollapsed = collapsedGroups.includes(group.id);
+                const isEditingGrp = editingGroupId === group.id;
+                const isHighlighted = overGroupId === group.id && activeId && !activeId.startsWith("group:");
+                const itemIds = group.items.map((_, idx) => getItemId(group.id, idx));
 
-            return (
-              <div key={group.id}>
-                {/* Group header */}
-                <div
-                  className="group flex cursor-pointer items-center gap-1 border-b border-zinc-700/50 bg-[#1a1e2e] px-2 py-1.5 hover:bg-[#252932]"
-                  onClick={() => onToggleGroup(group.id)}
-                  onContextMenu={(e) => handleGroupContextMenu(e, group.id)}
-                >
-                  <span className="text-[10px] text-zinc-500">
-                    {isCollapsed ? "▶" : "▼"}
-                  </span>
-                  {isEditingGroup ? (
-                    <input
-                      autoFocus
-                      defaultValue={group.name}
-                      onClick={(e) => e.stopPropagation()}
-                      onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === "Enter") {
-                          const val = (e.target as HTMLInputElement).value.trim();
-                          if (val) onRenameGroup(group.id, val);
-                          setEditingGroupId(null);
-                        }
-                        if (e.key === "Escape") setEditingGroupId(null);
-                      }}
-                      onBlur={(e) => {
-                        const val = e.target.value.trim();
-                        if (val && val !== group.name) onRenameGroup(group.id, val);
-                        setEditingGroupId(null);
-                      }}
-                      className="h-5 min-w-0 flex-1 rounded border border-blue-500 bg-[#131722] px-1 text-xs text-zinc-200 outline-none"
-                    />
-                  ) : (
-                    <span
-                      className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-400"
-                      onDoubleClick={(e) => {
-                        e.stopPropagation();
-                        setEditingGroupId(group.id);
-                      }}
-                      title="ダブルクリックで名前を編集 / 右クリックでメニュー"
-                    >
-                      {group.name}
-                      <span className="ml-1 text-[10px] text-zinc-600">
-                        ({group.items.length})
-                      </span>
-                    </span>
-                  )}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setAddingToGroupId(group.id);
-                    }}
-                    className="hidden rounded px-1 text-xs text-zinc-500 hover:bg-[#363a45] hover:text-white group-hover:block"
-                    title="このグループに銘柄を追加"
+                return (
+                  <div
+                    key={group.id}
+                    className={isHighlighted ? "bg-blue-900/20 ring-1 ring-inset ring-blue-500/30" : ""}
                   >
-                    +
-                  </button>
-                </div>
+                    <SortableGroupHeader
+                      group={group}
+                      isCollapsed={isCollapsed}
+                      isEditingGroup={isEditingGrp}
+                      setEditingGroupId={setEditingGroupId}
+                      onToggleGroup={onToggleGroup}
+                      setAddingToGroupId={setAddingToGroupId}
+                      onRenameGroup={onRenameGroup}
+                      onContextMenu={handleGroupContextMenu}
+                    />
 
-                {/* Group items */}
-                {!isCollapsed &&
-                  group.items.map((item, itemIdx) => {
-                    const label =
-                      item.displayName ||
-                      displayNames[item.symbol] ||
-                      item.name ||
-                      item.symbol;
-                    const isEditing = editingId === item.symbol;
-                    return (
-                      <div
-                        key={`${group.id}-${item.symbol}-${itemIdx}`}
-                        className="group flex cursor-pointer items-center gap-2 py-1.5 pl-5 pr-3 hover:bg-[#2a2e39]"
-                        onClick={() => {
-                          if (!isEditing) onSelect(item.symbol);
-                        }}
-                        onContextMenu={(e) =>
-                          handleItemContextMenu(e, group.id, itemIdx)
-                        }
-                      >
-                        <div className="min-w-0 flex-1">
-                          {isEditing ? (
-                            <input
-                              autoFocus
-                              defaultValue={label}
-                              onClick={(e) => e.stopPropagation()}
-                              onKeyDown={(e) => {
-                                e.stopPropagation();
-                                if (e.key === "Enter") {
-                                  const val = (
-                                    e.target as HTMLInputElement
-                                  ).value.trim();
-                                  if (val) {
-                                    onUpdateDisplayName(
-                                      group.id,
-                                      itemIdx,
-                                      val
-                                    );
-                                  }
-                                  setEditingId(null);
-                                }
-                                if (e.key === "Escape") {
-                                  setEditingId(null);
-                                }
-                              }}
-                              onBlur={(e) => {
-                                const val = e.target.value.trim();
-                                if (val && val !== label) {
-                                  onUpdateDisplayName(
-                                    group.id,
-                                    itemIdx,
-                                    val
-                                  );
-                                }
-                                setEditingId(null);
-                              }}
-                              className="h-5 w-full rounded border border-blue-500 bg-[#131722] px-1 text-xs text-zinc-200 outline-none"
-                            />
-                          ) : (
-                            <>
-                              <div
-                                className="truncate text-xs font-medium text-zinc-200 hover:text-blue-400"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setEditingId(item.symbol);
-                                }}
-                                title="クリックして名前を編集 / 右クリックでメニュー"
-                                style={{ cursor: "text" }}
-                              >
-                                {label}
-                              </div>
-                              {label !== item.symbol && (
-                                <div className="truncate text-[10px] text-zinc-500">
-                                  {item.symbol}
-                                </div>
-                              )}
-                            </>
-                          )}
-                        </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onRemoveItem(group.id, itemIdx);
-                          }}
-                          className="hidden text-xs text-zinc-500 hover:text-red-400 group-hover:block"
-                          title="削除"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    );
-                  })}
-
-                {/* Empty group message */}
-                {!isCollapsed && group.items.length === 0 && (
-                  <div className="py-2 pl-5 text-[10px] text-zinc-600">
-                    銘柄がありません
+                    {!isCollapsed && (
+                      <SortableContext items={itemIds} strategy={verticalListSortingStrategy}>
+                        {group.items.map((item, itemIdx) => (
+                          <SortableWatchlistItem
+                            key={getItemId(group.id, itemIdx)}
+                            item={item}
+                            itemId={getItemId(group.id, itemIdx)}
+                            groupId={group.id}
+                            displayNames={displayNames}
+                            editingId={editingId}
+                            setEditingId={setEditingId}
+                            onSelect={onSelect}
+                            onUpdateDisplayName={onUpdateDisplayName}
+                            onRemoveItem={onRemoveItem}
+                            onContextMenu={handleItemContextMenu}
+                          />
+                        ))}
+                        {group.items.length === 0 && (
+                          <div className="py-2 pl-5 text-[10px] text-zinc-600">
+                            銘柄がありません
+                          </div>
+                        )}
+                      </SortableContext>
+                    )}
                   </div>
-                )}
-              </div>
-            );
-          })}
+                );
+              })}
+            </SortableContext>
+
+            {/* Drag overlay */}
+            <DragOverlay>
+              {activeItemData ? (
+                <SortableWatchlistItem
+                  item={activeItemData.item}
+                  itemId={activeItemData.itemId}
+                  groupId={activeItemData.groupId}
+                  displayNames={displayNames}
+                  editingId={null}
+                  setEditingId={() => {}}
+                  onSelect={() => {}}
+                  onUpdateDisplayName={() => {}}
+                  onRemoveItem={() => {}}
+                  onContextMenu={() => {}}
+                  isDragOverlay
+                />
+              ) : null}
+            </DragOverlay>
+          </DndContext>
         </div>
 
         {/* Quick add section */}
@@ -1163,6 +1421,25 @@ export default function Home() {
     setGroups((prev) => [...prev, newGroup]);
   }, []);
 
+  const handleReorderItem = useCallback(
+    (groupId: string, fromIndex: number, toIndex: number) => {
+      setGroups((prev) =>
+        prev.map((g) => {
+          if (g.id !== groupId) return g;
+          return { ...g, items: arrayMove(g.items, fromIndex, toIndex) };
+        })
+      );
+    },
+    []
+  );
+
+  const handleReorderGroups = useCallback(
+    (fromIndex: number, toIndex: number) => {
+      setGroups((prev) => arrayMove(prev, fromIndex, toIndex));
+    },
+    []
+  );
+
   // Close fullscreen on Escape
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -1246,6 +1523,8 @@ export default function Home() {
           onRemoveItem={handleRemoveItem}
           onUpdateDisplayName={handleUpdateDisplayName}
           onMoveItem={handleMoveItem}
+          onReorderItem={handleReorderItem}
+          onReorderGroups={handleReorderGroups}
           onToggleGroup={handleToggleGroup}
           onRenameGroup={handleRenameGroup}
           onDeleteGroup={handleDeleteGroup}
