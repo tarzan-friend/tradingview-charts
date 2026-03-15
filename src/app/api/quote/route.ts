@@ -1,10 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-
-// Convert "NASDAQ:AAPL" → "AAPL", "NYSE:TM" → "TM"
-function toYahooSymbol(symbol: string): string {
-  const parts = symbol.split(":");
-  return parts.length > 1 ? parts[1] : parts[0];
-}
+import { toYahooSymbol } from "@/lib/symbolMap";
 
 export async function GET(request: NextRequest) {
   const symbols = request.nextUrl.searchParams.get("symbols");

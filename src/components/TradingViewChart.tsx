@@ -25,6 +25,7 @@ export const TIME_RANGES: TimeRange[] = [
 
 interface TradingViewChartProps {
   symbol: string;
+  displayName: string;
   index: number;
   timeRange: TimeRange;
   refreshKey: number;
@@ -65,6 +66,7 @@ function ChangeBadge({ changePercent }: { changePercent: number | null }) {
 
 export default function TradingViewChart({
   symbol,
+  displayName,
   index,
   timeRange,
   refreshKey,
@@ -264,9 +266,9 @@ export default function TradingViewChart({
                 setEditing(true);
               }}
               className="truncate text-xs font-medium text-zinc-300 hover:text-white"
-              title="クリックして銘柄を変更"
+              title={`${symbol} — クリックして銘柄を変更`}
             >
-              {symbol}
+              {displayName || symbol}
             </button>
             <ChangeBadge changePercent={changePercent} />
           </div>

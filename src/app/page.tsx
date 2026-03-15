@@ -8,6 +8,13 @@ import TradingViewChart, { TIME_RANGES } from "@/components/TradingViewChart";
 interface WatchlistItem {
   symbol: string;
   name: string;
+  displayName: string;
+}
+
+interface WatchlistGroup {
+  id: string;
+  name: string;
+  items: WatchlistItem[];
 }
 
 interface LayoutOption {
@@ -54,24 +61,85 @@ const DEFAULT_SYMBOLS = [
   "NASDAQ:INTC",
 ];
 
-const DEFAULT_WATCHLIST: WatchlistItem[] = [
-  { symbol: "NASDAQ:AAPL", name: "Apple" },
-  { symbol: "NASDAQ:NVDA", name: "NVIDIA" },
-  { symbol: "NASDAQ:MSFT", name: "Microsoft" },
-  { symbol: "NASDAQ:GOOGL", name: "Alphabet" },
-  { symbol: "NYSE:TM", name: "トヨタ (ADR)" },
-  { symbol: "NYSE:SONY", name: "ソニー (ADR)" },
-  { symbol: "NYSE:TSM", name: "TSMC" },
+const DEFAULT_GROUPS: WatchlistGroup[] = [
+  {
+    id: "us-stocks",
+    name: "米国株",
+    items: [
+      { symbol: "NASDAQ:AAPL", name: "Apple", displayName: "" },
+      { symbol: "NASDAQ:NVDA", name: "NVIDIA", displayName: "" },
+      { symbol: "NASDAQ:MSFT", name: "Microsoft", displayName: "" },
+      { symbol: "NASDAQ:GOOGL", name: "Alphabet", displayName: "" },
+      { symbol: "NASDAQ:AMZN", name: "Amazon", displayName: "" },
+      { symbol: "NASDAQ:META", name: "Meta", displayName: "" },
+    ],
+  },
+  {
+    id: "jp-stocks",
+    name: "日本株・指数",
+    items: [
+      { symbol: "NYSE:TM", name: "トヨタ (ADR)", displayName: "" },
+      { symbol: "NYSE:SONY", name: "ソニー (ADR)", displayName: "" },
+      { symbol: "NYSE:TSM", name: "TSMC", displayName: "" },
+      { symbol: "日経平均", name: "日経225", displayName: "日経225" },
+    ],
+  },
+  {
+    id: "others",
+    name: "その他",
+    items: [],
+  },
 ];
 
 const STORAGE_KEY = "tradingview-charts-state";
 const STORAGE_VERSION_KEY = "tradingview-charts-version";
-const STORAGE_VERSION = "v5";
+const STORAGE_VERSION = "v11";
+
+const QUICK_ADD_ITEMS: WatchlistItem[] = [
+  { symbol: "日経平均", name: "日経225", displayName: "日経225" },
+  { symbol: "S&P500", name: "S&P 500", displayName: "S&P 500" },
+  { symbol: "BTC", name: "ビットコイン", displayName: "ビットコイン" },
+  { symbol: "GOLD", name: "ゴールド", displayName: "ゴールド" },
+  { symbol: "VIX", name: "恐怖指数", displayName: "恐怖指数" },
+];
 
 interface AppState {
   symbols: string[];
   layoutIndex: number;
-  watchlist: WatchlistItem[];
+  groups: WatchlistGroup[];
+  collapsedGroups: string[]; // group ids that are collapsed
+  displayNames: Record<string, string>;
+}
+
+// Resolve symbol to display name via API
+async function resolveDisplayName(symbol: string): Promise<string> {
+  try {
+    const res = await fetch(
+      `/api/resolve?symbol=${encodeURIComponent(symbol)}`
+    );
+    const data = await res.json();
+    return data.shortName || symbol;
+  } catch {
+    return symbol;
+  }
+}
+
+// Check if input is a Japanese stock code (4-5 digit number)
+function isJapaneseStockCode(input: string): boolean {
+  return /^\d{4,5}$/.test(input.trim());
+}
+
+// Convert input to proper symbol (4-5 digit → append .T)
+function normalizeSymbolInput(input: string): string {
+  const trimmed = input.trim();
+  if (isJapaneseStockCode(trimmed)) {
+    return `${trimmed}.T`;
+  }
+  return trimmed;
+}
+
+function generateGroupId(): string {
+  return `group-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function loadState(): AppState | null {
@@ -96,53 +164,374 @@ function saveState(state: AppState) {
   } catch {}
 }
 
+// --- Search result type ---
+interface SearchSuggestion {
+  symbol: string;
+  name: string;
+  exchange: string;
+}
+
+// --- Context Menu Component ---
+interface ContextMenuItem {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  separator?: boolean;
+}
+
+function ContextMenu({
+  x,
+  y,
+  items,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  items: ContextMenuItem[];
+  onClose: () => void;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose]);
+
+  return (
+    <div
+      ref={menuRef}
+      className="fixed z-[9999] w-[180px] rounded border border-zinc-700 bg-zinc-800 py-1 shadow-xl"
+      style={{ left: x, top: y }}
+    >
+      {items.map((item, i) => (
+        <div key={i}>
+          {item.separator && (
+            <div className="mx-2 my-1 border-t border-zinc-700" />
+          )}
+          <button
+            onClick={() => {
+              if (!item.disabled) {
+                item.onClick();
+                onClose();
+              }
+            }}
+            disabled={item.disabled}
+            className={`flex w-full px-3 py-1.5 text-left text-xs ${
+              item.disabled
+                ? "cursor-default text-zinc-600"
+                : "text-zinc-300 hover:bg-zinc-700 hover:text-white"
+            }`}
+          >
+            {item.label}
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// --- Add Menu (top-level + button) ---
+function AddMenu({
+  onAddSymbol,
+  onAddGroup,
+  onClose,
+  anchorRef,
+}: {
+  onAddSymbol: () => void;
+  onAddGroup: () => void;
+  onClose: () => void;
+  anchorRef: React.RefObject<HTMLButtonElement | null>;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (
+        menuRef.current &&
+        !menuRef.current.contains(e.target as Node) &&
+        anchorRef.current &&
+        !anchorRef.current.contains(e.target as Node)
+      ) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose, anchorRef]);
+
+  return (
+    <div
+      ref={menuRef}
+      className="absolute left-0 right-0 z-40 rounded border border-zinc-600 bg-[#1e222d] py-1 shadow-xl"
+      style={{ top: "100%" }}
+    >
+      <button
+        onClick={() => {
+          onAddSymbol();
+          onClose();
+        }}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-[#2a2e39] hover:text-white"
+      >
+        <span className="text-blue-400">+</span> 銘柄を追加
+      </button>
+      <button
+        onClick={() => {
+          onAddGroup();
+          onClose();
+        }}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-[#2a2e39] hover:text-white"
+      >
+        <span className="text-green-400">+</span> グループを追加
+      </button>
+    </div>
+  );
+}
+
 // --- Watchlist Sidebar ---
 
 function WatchlistSidebar({
-  watchlist,
+  groups,
+  collapsedGroups,
   onSelect,
-  onAdd,
-  onRemove,
+  onAddToGroup,
+  onRemoveItem,
+  onUpdateDisplayName,
+  onMoveItem,
+  onToggleGroup,
+  onRenameGroup,
+  onDeleteGroup,
+  onAddGroup,
+  displayNames,
   open,
   onToggle,
 }: {
-  watchlist: WatchlistItem[];
+  groups: WatchlistGroup[];
+  collapsedGroups: string[];
   onSelect: (symbol: string) => void;
-  onAdd: (item: WatchlistItem) => void;
-  onRemove: (index: number) => void;
+  onAddToGroup: (groupId: string, item: WatchlistItem) => void;
+  onRemoveItem: (groupId: string, itemIndex: number) => void;
+  onUpdateDisplayName: (groupId: string, itemIndex: number, newName: string) => void;
+  onMoveItem: (fromGroupId: string, itemIndex: number, toGroupId: string) => void;
+  onToggleGroup: (groupId: string) => void;
+  onRenameGroup: (groupId: string, newName: string) => void;
+  onDeleteGroup: (groupId: string) => void;
+  onAddGroup: (name: string) => void;
+  displayNames: Record<string, string>;
   open: boolean;
   onToggle: () => void;
 }) {
-  const [adding, setAdding] = useState(false);
-  const [symbolInput, setSymbolInput] = useState("");
-  const [nameInput, setNameInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [suggestions, setSuggestions] = useState<SearchSuggestion[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [addError, setAddError] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const [addingToGroupId, setAddingToGroupId] = useState<string | null>(null);
+  const [showTopMenu, setShowTopMenu] = useState(false);
+  const [addingNewGroup, setAddingNewGroup] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    type: "item" | "group";
+    groupId: string;
+    itemIndex?: number;
+  } | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const topMenuBtnRef = useRef<HTMLButtonElement | null>(null);
 
-  const handleAdd = () => {
-    const sym = symbolInput.trim().toUpperCase();
-    if (sym) {
-      onAdd({ symbol: sym, name: nameInput.trim() || sym });
-      setSymbolInput("");
-      setNameInput("");
-      setAdding(false);
+  // All items flattened for duplicate checking
+  const allItems = groups.flatMap((g) => g.items);
+
+  // Debounced search
+  const doSearch = useCallback(async (query: string) => {
+    if (query.trim().length < 2) {
+      setSuggestions([]);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    try {
+      const res = await fetch(
+        `/api/search?q=${encodeURIComponent(query.trim())}`
+      );
+      const data = await res.json();
+      setSuggestions(data.results || []);
+    } catch {
+      setSuggestions([]);
+    } finally {
+      setSearching(false);
+    }
+  }, []);
+
+  const handleSearchChange = (value: string) => {
+    setSearchQuery(value);
+    setAddError("");
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (value.trim().length >= 2) {
+      debounceRef.current = setTimeout(() => doSearch(value), 300);
+    } else {
+      setSuggestions([]);
     }
   };
 
-  const handleSearchKeyDown = (e: React.KeyboardEvent) => {
+  const addItemToGroup = (item: WatchlistItem) => {
+    const targetGroupId = addingToGroupId || groups[0]?.id;
+    if (targetGroupId) {
+      onAddToGroup(targetGroupId, item);
+    }
+    setSearchQuery("");
+    setSuggestions([]);
+    setAddError("");
+    setAddingToGroupId(null);
+  };
+
+  const handleSuggestionClick = (s: SearchSuggestion) => {
+    const exists = allItems.some(
+      (w) => w.symbol.toUpperCase() === s.symbol.toUpperCase()
+    );
+    if (exists) {
+      setAddError("この銘柄は既に追加されています");
+      return;
+    }
+    addItemToGroup({ symbol: s.symbol, name: s.name, displayName: s.name });
+  };
+
+  const handleSearchKeyDown = async (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && searchQuery.trim()) {
-      const sym = searchQuery.trim().toUpperCase();
-      onAdd({ symbol: sym, name: sym });
+      if (suggestions.length > 0) {
+        handleSuggestionClick(suggestions[0]);
+        return;
+      }
+
+      const rawInput = searchQuery.trim();
+      const normalized = normalizeSymbolInput(rawInput);
+
+      const exists = allItems.some(
+        (w) => w.symbol.toUpperCase() === normalized.toUpperCase()
+      );
+      if (exists) {
+        setAddError("この銘柄は既に追加されています");
+        return;
+      }
+
+      setSearching(true);
+      setAddError("");
+      try {
+        const res = await fetch(
+          `/api/validate?symbol=${encodeURIComponent(normalized)}`
+        );
+        const data = await res.json();
+        if (data.valid) {
+          const symbol = data.symbol || normalized;
+          const apiName = await resolveDisplayName(symbol);
+          addItemToGroup({
+            symbol: symbol,
+            name: apiName,
+            displayName: apiName,
+          });
+        } else {
+          setAddError("この銘柄は見つかりませんでした");
+        }
+      } catch {
+        setAddError("検索中にエラーが発生しました");
+      } finally {
+        setSearching(false);
+      }
+    }
+    if (e.key === "Escape") {
+      setSuggestions([]);
       setSearchQuery("");
+      setAddingToGroupId(null);
     }
   };
 
-  const filteredWatchlist = searchQuery.trim()
-    ? watchlist.filter(
-        (item) =>
-          item.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          item.name.toLowerCase().includes(searchQuery.toLowerCase())
-      )
-    : watchlist;
+  const handleQuickAdd = (item: WatchlistItem) => {
+    const exists = allItems.some(
+      (w) => w.symbol.toUpperCase() === item.symbol.toUpperCase()
+    );
+    if (!exists) {
+      const targetGroupId = groups[groups.length - 1]?.id || groups[0]?.id;
+      if (targetGroupId) {
+        onAddToGroup(targetGroupId, item);
+      }
+    }
+  };
+
+  const handleItemContextMenu = (
+    e: React.MouseEvent,
+    groupId: string,
+    itemIndex: number
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY, type: "item", groupId, itemIndex });
+  };
+
+  const handleGroupContextMenu = (e: React.MouseEvent, groupId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY, type: "group", groupId });
+  };
+
+  const showSuggestions =
+    suggestions.length > 0 && searchQuery.trim().length >= 2;
+
+  // Build context menu items
+  const getContextMenuItems = (): ContextMenuItem[] => {
+    if (!contextMenu) return [];
+
+    if (contextMenu.type === "group") {
+      const group = groups.find((g) => g.id === contextMenu.groupId);
+      const canDelete = group && group.items.length === 0;
+      return [
+        {
+          label: "グループ名を編集",
+          onClick: () => setEditingGroupId(contextMenu.groupId),
+        },
+        {
+          label: "グループを削除",
+          onClick: () => onDeleteGroup(contextMenu.groupId),
+          disabled: !canDelete,
+          separator: true,
+        },
+      ];
+    }
+
+    // Item context menu: flat list with move targets + separator + delete
+    const menuItems: ContextMenuItem[] = [];
+
+    // Move to group options
+    groups.forEach((g) => {
+      const isCurrent = g.id === contextMenu.groupId;
+      menuItems.push({
+        label: `移動: ${g.name}`,
+        onClick: () => {
+          if (contextMenu.itemIndex !== undefined) {
+            onMoveItem(contextMenu.groupId, contextMenu.itemIndex, g.id);
+          }
+        },
+        disabled: isCurrent,
+      });
+    });
+
+    // Separator + delete
+    menuItems.push({
+      label: "削除",
+      separator: true,
+      onClick: () => {
+        if (contextMenu.itemIndex !== undefined) {
+          onRemoveItem(contextMenu.groupId, contextMenu.itemIndex);
+        }
+      },
+    });
+
+    return menuItems;
+  };
 
   return (
     <>
@@ -165,91 +554,351 @@ function WatchlistSidebar({
           transition: "width 0.2s",
         }}
       >
-        <div className="flex h-8 items-center justify-between px-3">
+        {/* Header with add button */}
+        <div className="relative flex h-8 items-center justify-between px-3">
           <span className="text-xs font-semibold text-zinc-300">
             ウォッチリスト
           </span>
           <button
-            onClick={() => setAdding(!adding)}
-            className="text-lg leading-none text-zinc-400 hover:text-white"
-            title="銘柄を追加"
+            ref={topMenuBtnRef}
+            onClick={() => setShowTopMenu((p) => !p)}
+            className="rounded px-1.5 py-0.5 text-xs text-zinc-400 hover:bg-[#2a2e39] hover:text-white"
+            title="追加"
           >
             +
           </button>
+          {showTopMenu && (
+            <AddMenu
+              anchorRef={topMenuBtnRef}
+              onAddSymbol={() => {
+                // Focus the first group's add
+                setAddingToGroupId(groups[0]?.id || null);
+              }}
+              onAddGroup={() => setAddingNewGroup(true)}
+              onClose={() => setShowTopMenu(false)}
+            />
+          )}
         </div>
 
-        {/* Search box */}
-        <div className="px-3 pb-1">
-          <input
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyDown={handleSearchKeyDown}
-            placeholder="銘柄を検索..."
-            className="h-6 w-full rounded border border-zinc-600 bg-[#131722] px-2 text-xs text-zinc-200 outline-none focus:border-blue-500"
-          />
-        </div>
-
-        {adding && (
-          <div className="flex flex-col gap-1 border-b border-zinc-700 px-3 pb-2">
+        {/* Add new group input */}
+        {addingNewGroup && (
+          <div className="px-3 pb-1">
             <input
               autoFocus
-              value={symbolInput}
-              onChange={(e) => setSymbolInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAdd()}
-              placeholder="NASDAQ:AAPL"
-              className="h-6 rounded border border-zinc-600 bg-[#131722] px-2 text-xs text-zinc-200 outline-none focus:border-blue-500"
+              placeholder="グループ名"
+              className="h-7 w-full rounded border border-green-500 bg-[#131722] px-2 text-xs text-zinc-200 outline-none"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  const val = (e.target as HTMLInputElement).value.trim();
+                  if (val) {
+                    onAddGroup(val);
+                  }
+                  setAddingNewGroup(false);
+                }
+                if (e.key === "Escape") {
+                  setAddingNewGroup(false);
+                }
+              }}
+              onBlur={(e) => {
+                const val = e.target.value.trim();
+                if (val) {
+                  onAddGroup(val);
+                }
+                setAddingNewGroup(false);
+              }}
             />
-            <input
-              value={nameInput}
-              onChange={(e) => setNameInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAdd()}
-              placeholder="メモ名（任意）"
-              className="h-6 rounded border border-zinc-600 bg-[#131722] px-2 text-xs text-zinc-200 outline-none focus:border-blue-500"
-            />
-            <button
-              onClick={handleAdd}
-              className="h-6 rounded bg-blue-600 text-xs text-white hover:bg-blue-500"
-            >
-              追加
-            </button>
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto">
-          {filteredWatchlist.map((item, i) => {
-            // Find original index for removal
-            const originalIndex = watchlist.indexOf(item);
-            return (
-              <div
-                key={`${item.symbol}-${originalIndex}`}
-                className="group flex cursor-pointer items-center gap-2 px-3 py-1.5 hover:bg-[#2a2e39]"
-                onClick={() => onSelect(item.symbol)}
+        {/* Search box (shown when adding to a specific group) */}
+        {addingToGroupId && (
+          <div className="relative px-3 pb-1">
+            <div className="mb-1 text-[10px] text-blue-400">
+              「{groups.find((g) => g.id === addingToGroupId)?.name}」に追加
+              <button
+                onClick={() => setAddingToGroupId(null)}
+                className="ml-1 text-zinc-500 hover:text-zinc-300"
               >
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-xs font-medium text-zinc-200">
-                    {item.symbol}
-                  </div>
-                  {item.name && item.name !== item.symbol && (
-                    <div className="truncate text-[10px] text-zinc-500">
-                      {item.name}
-                    </div>
-                  )}
-                </div>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onRemove(originalIndex);
-                  }}
-                  className="hidden text-xs text-zinc-500 hover:text-red-400 group-hover:block"
-                  title="削除"
+                ✕
+              </button>
+            </div>
+            <input
+              autoFocus
+              value={searchQuery}
+              onChange={(e) => handleSearchChange(e.target.value)}
+              onKeyDown={handleSearchKeyDown}
+              placeholder="証券コード or ティッカー（例: 7011, AAPL, BTC）"
+              className="h-7 w-full rounded border border-zinc-600 bg-[#131722] px-2 text-xs text-zinc-200 outline-none focus:border-blue-500"
+            />
+
+            {/* Search suggestions dropdown */}
+            {showSuggestions && (
+              <div className="absolute left-3 right-3 z-30 rounded border border-zinc-600 bg-[#1a1e2e] shadow-lg" style={{ top: "calc(100% - 4px)" }}>
+                {suggestions.map((s, i) => {
+                  const exists = allItems.some(
+                    (w) => w.symbol.toUpperCase() === s.symbol.toUpperCase()
+                  );
+                  return (
+                    <button
+                      key={`${s.symbol}-${i}`}
+                      onClick={() => handleSuggestionClick(s)}
+                      disabled={exists}
+                      className={`flex w-full items-start gap-2 px-2 py-1.5 text-left ${
+                        exists
+                          ? "cursor-default opacity-40"
+                          : "hover:bg-[#2a2e39]"
+                      } ${i > 0 ? "border-t border-zinc-700/50" : ""}`}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1">
+                          <span className="text-[11px] font-medium text-blue-400">
+                            {s.symbol}
+                          </span>
+                          {exists && (
+                            <span className="text-[9px] text-zinc-500">
+                              追加済
+                            </span>
+                          )}
+                        </div>
+                        <div className="truncate text-[10px] text-zinc-400">
+                          {s.name}
+                        </div>
+                      </div>
+                      <span className="shrink-0 text-[9px] text-zinc-600">
+                        {s.exchange}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Searching indicator */}
+            {searching && searchQuery.trim().length >= 2 && (
+              <div className="absolute left-3 right-3 z-30 rounded border border-zinc-600 bg-[#1a1e2e] px-2 py-2 text-[10px] text-zinc-500 shadow-lg" style={{ top: "calc(100% - 4px)" }}>
+                検索中...
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Error message */}
+        {addError && (
+          <div className="px-3 pb-1">
+            <div className="rounded bg-red-900/30 px-2 py-1 text-[10px] text-red-400">
+              {addError}
+            </div>
+          </div>
+        )}
+
+        {/* Groups */}
+        <div className="flex-1 overflow-y-auto">
+          {groups.map((group) => {
+            const isCollapsed = collapsedGroups.includes(group.id);
+            const isEditingGroup = editingGroupId === group.id;
+
+            return (
+              <div key={group.id}>
+                {/* Group header */}
+                <div
+                  className="group flex cursor-pointer items-center gap-1 border-b border-zinc-700/50 bg-[#1a1e2e] px-2 py-1.5 hover:bg-[#252932]"
+                  onClick={() => onToggleGroup(group.id)}
+                  onContextMenu={(e) => handleGroupContextMenu(e, group.id)}
                 >
-                  ✕
-                </button>
+                  <span className="text-[10px] text-zinc-500">
+                    {isCollapsed ? "▶" : "▼"}
+                  </span>
+                  {isEditingGroup ? (
+                    <input
+                      autoFocus
+                      defaultValue={group.name}
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === "Enter") {
+                          const val = (e.target as HTMLInputElement).value.trim();
+                          if (val) onRenameGroup(group.id, val);
+                          setEditingGroupId(null);
+                        }
+                        if (e.key === "Escape") setEditingGroupId(null);
+                      }}
+                      onBlur={(e) => {
+                        const val = e.target.value.trim();
+                        if (val && val !== group.name) onRenameGroup(group.id, val);
+                        setEditingGroupId(null);
+                      }}
+                      className="h-5 min-w-0 flex-1 rounded border border-blue-500 bg-[#131722] px-1 text-xs text-zinc-200 outline-none"
+                    />
+                  ) : (
+                    <span
+                      className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-400"
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        setEditingGroupId(group.id);
+                      }}
+                      title="ダブルクリックで名前を編集 / 右クリックでメニュー"
+                    >
+                      {group.name}
+                      <span className="ml-1 text-[10px] text-zinc-600">
+                        ({group.items.length})
+                      </span>
+                    </span>
+                  )}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setAddingToGroupId(group.id);
+                    }}
+                    className="hidden rounded px-1 text-xs text-zinc-500 hover:bg-[#363a45] hover:text-white group-hover:block"
+                    title="このグループに銘柄を追加"
+                  >
+                    +
+                  </button>
+                </div>
+
+                {/* Group items */}
+                {!isCollapsed &&
+                  group.items.map((item, itemIdx) => {
+                    const label =
+                      item.displayName ||
+                      displayNames[item.symbol] ||
+                      item.name ||
+                      item.symbol;
+                    const isEditing = editingId === item.symbol;
+                    return (
+                      <div
+                        key={`${group.id}-${item.symbol}-${itemIdx}`}
+                        className="group flex cursor-pointer items-center gap-2 py-1.5 pl-5 pr-3 hover:bg-[#2a2e39]"
+                        onClick={() => {
+                          if (!isEditing) onSelect(item.symbol);
+                        }}
+                        onContextMenu={(e) =>
+                          handleItemContextMenu(e, group.id, itemIdx)
+                        }
+                      >
+                        <div className="min-w-0 flex-1">
+                          {isEditing ? (
+                            <input
+                              autoFocus
+                              defaultValue={label}
+                              onClick={(e) => e.stopPropagation()}
+                              onKeyDown={(e) => {
+                                e.stopPropagation();
+                                if (e.key === "Enter") {
+                                  const val = (
+                                    e.target as HTMLInputElement
+                                  ).value.trim();
+                                  if (val) {
+                                    onUpdateDisplayName(
+                                      group.id,
+                                      itemIdx,
+                                      val
+                                    );
+                                  }
+                                  setEditingId(null);
+                                }
+                                if (e.key === "Escape") {
+                                  setEditingId(null);
+                                }
+                              }}
+                              onBlur={(e) => {
+                                const val = e.target.value.trim();
+                                if (val && val !== label) {
+                                  onUpdateDisplayName(
+                                    group.id,
+                                    itemIdx,
+                                    val
+                                  );
+                                }
+                                setEditingId(null);
+                              }}
+                              className="h-5 w-full rounded border border-blue-500 bg-[#131722] px-1 text-xs text-zinc-200 outline-none"
+                            />
+                          ) : (
+                            <>
+                              <div
+                                className="truncate text-xs font-medium text-zinc-200 hover:text-blue-400"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingId(item.symbol);
+                                }}
+                                title="クリックして名前を編集 / 右クリックでメニュー"
+                                style={{ cursor: "text" }}
+                              >
+                                {label}
+                              </div>
+                              {label !== item.symbol && (
+                                <div className="truncate text-[10px] text-zinc-500">
+                                  {item.symbol}
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onRemoveItem(group.id, itemIdx);
+                          }}
+                          className="hidden text-xs text-zinc-500 hover:text-red-400 group-hover:block"
+                          title="削除"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    );
+                  })}
+
+                {/* Empty group message */}
+                {!isCollapsed && group.items.length === 0 && (
+                  <div className="py-2 pl-5 text-[10px] text-zinc-600">
+                    銘柄がありません
+                  </div>
+                )}
               </div>
             );
           })}
         </div>
+
+        {/* Quick add section */}
+        <div className="shrink-0 border-t border-zinc-700 px-3 py-2">
+          <div className="mb-1 text-[10px] font-medium text-zinc-500">
+            よく使う銘柄
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {QUICK_ADD_ITEMS.map((item) => {
+              const exists = allItems.some(
+                (w) => w.symbol.toUpperCase() === item.symbol.toUpperCase()
+              );
+              return (
+                <button
+                  key={item.symbol}
+                  onClick={() => handleQuickAdd(item)}
+                  disabled={exists}
+                  className={`rounded px-1.5 py-0.5 text-[10px] transition-colors ${
+                    exists
+                      ? "cursor-default bg-zinc-700/50 text-zinc-600"
+                      : "bg-[#2a2e39] text-zinc-400 hover:bg-[#363a45] hover:text-zinc-200"
+                  }`}
+                  title={item.name}
+                >
+                  {item.name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </aside>
+
+      {/* Context menu */}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={getContextMenuItems()}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </>
   );
 }
@@ -258,15 +907,22 @@ function WatchlistSidebar({
 
 export default function Home() {
   const [mounted, setMounted] = useState(false);
-  const [symbols, setSymbols] = useState<string[]>(DEFAULT_SYMBOLS.slice(0, 4));
+  const [symbols, setSymbols] = useState<string[]>(
+    DEFAULT_SYMBOLS.slice(0, 4)
+  );
   const [layoutIndex, setLayoutIndex] = useState(2); // default 4 charts
-  const [watchlist, setWatchlist] = useState<WatchlistItem[]>(DEFAULT_WATCHLIST);
+  const [groups, setGroups] = useState<WatchlistGroup[]>(DEFAULT_GROUPS);
+  const [collapsedGroups, setCollapsedGroups] = useState<string[]>([]);
+  const [displayNames, setDisplayNames] = useState<Record<string, string>>({});
   const [focusedChart, setFocusedChart] = useState(0);
+  const [fullscreenChart, setFullscreenChart] = useState<number | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [timeRangeIndex, setTimeRangeIndex] = useState(0); // default 1D
   const [refreshKey, setRefreshKey] = useState(0);
   const [lastUpdated, setLastUpdated] = useState("");
-  const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
+    null
+  );
 
   // Load from localStorage on mount
   useEffect(() => {
@@ -274,16 +930,74 @@ export default function Home() {
     if (saved) {
       setSymbols(saved.symbols);
       setLayoutIndex(saved.layoutIndex);
-      setWatchlist(saved.watchlist);
+      if (saved.groups) setGroups(saved.groups);
+      if (saved.collapsedGroups) setCollapsedGroups(saved.collapsedGroups);
+      if (saved.displayNames) setDisplayNames(saved.displayNames);
     }
     setMounted(true);
   }, []);
 
+  // On mount, resolve missing displayNames for watchlist items and chart symbols
+  useEffect(() => {
+    if (!mounted) return;
+
+    const symbolsToResolve = new Set<string>();
+
+    // Check all group items
+    for (const group of groups) {
+      for (const item of group.items) {
+        if (!item.displayName && !displayNames[item.symbol]) {
+          symbolsToResolve.add(item.symbol);
+        }
+      }
+    }
+
+    // Check chart symbols
+    for (const sym of symbols) {
+      if (!displayNames[sym]) {
+        symbolsToResolve.add(sym);
+      }
+    }
+
+    if (symbolsToResolve.size === 0) return;
+
+    const resolveAll = async () => {
+      const newNames: Record<string, string> = {};
+      const syms = Array.from(symbolsToResolve);
+      for (let i = 0; i < syms.length; i++) {
+        const sym = syms[i];
+        const name = await resolveDisplayName(sym);
+        newNames[sym] = name;
+        if (i < syms.length - 1) {
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      }
+
+      setDisplayNames((prev) => ({ ...prev, ...newNames }));
+
+      // Update group items that are missing displayName
+      setGroups((prev) =>
+        prev.map((group) => ({
+          ...group,
+          items: group.items.map((item) => {
+            if (!item.displayName && newNames[item.symbol]) {
+              return { ...item, displayName: newNames[item.symbol] };
+            }
+            return item;
+          }),
+        }))
+      );
+    };
+
+    resolveAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mounted]);
+
   // Save to localStorage on state change
   useEffect(() => {
     if (!mounted) return;
-    saveState({ symbols, layoutIndex, watchlist });
-  }, [symbols, layoutIndex, watchlist, mounted]);
+    saveState({ symbols, layoutIndex, groups, collapsedGroups, displayNames });
+  }, [symbols, layoutIndex, groups, collapsedGroups, displayNames, mounted]);
 
   // Auto-refresh every 30 seconds
   useEffect(() => {
@@ -296,59 +1010,177 @@ export default function Home() {
     }, 30000);
 
     return () => {
-      if (refreshIntervalRef.current) clearInterval(refreshIntervalRef.current);
+      if (refreshIntervalRef.current)
+        clearInterval(refreshIntervalRef.current);
     };
   }, [mounted]);
 
   const layout = LAYOUTS[layoutIndex];
 
-  const handleLayoutChange = useCallback(
-    (newIndex: number) => {
-      const newLayout = LAYOUTS[newIndex];
-      setLayoutIndex(newIndex);
-      setSymbols((prev) => {
-        if (prev.length >= newLayout.count) return prev.slice(0, newLayout.count);
-        const extra = [];
-        for (let i = prev.length; i < newLayout.count; i++) {
-          extra.push(DEFAULT_SYMBOLS[i % DEFAULT_SYMBOLS.length]);
-        }
-        return [...prev, ...extra];
-      });
-      setFocusedChart((prev) =>
-        prev >= newLayout.count ? 0 : prev
-      );
-    },
-    []
-  );
-
-  const handleSymbolChange = useCallback((index: number, newSymbol: string) => {
+  const handleLayoutChange = useCallback((newIndex: number) => {
+    const newLayout = LAYOUTS[newIndex];
+    setLayoutIndex(newIndex);
     setSymbols((prev) => {
-      const next = [...prev];
-      next[index] = newSymbol;
-      return next;
+      if (prev.length >= newLayout.count)
+        return prev.slice(0, newLayout.count);
+      const extra = [];
+      for (let i = prev.length; i < newLayout.count; i++) {
+        extra.push(DEFAULT_SYMBOLS[i % DEFAULT_SYMBOLS.length]);
+      }
+      return [...prev, ...extra];
     });
+    setFocusedChart((prev) => (prev >= newLayout.count ? 0 : prev));
   }, []);
+
+  const handleSymbolChange = useCallback(
+    (index: number, newSymbol: string) => {
+      const normalized = normalizeSymbolInput(newSymbol);
+      setSymbols((prev) => {
+        const next = [...prev];
+        next[index] = normalized;
+        return next;
+      });
+      if (!displayNames[normalized]) {
+        resolveDisplayName(normalized).then((name) => {
+          setDisplayNames((prev) => ({ ...prev, [normalized]: name }));
+        });
+      }
+    },
+    [displayNames]
+  );
 
   const handleWatchlistSelect = useCallback(
     (symbol: string) => {
-      // Apply to focused chart, or chart 0 if none focused
       const target = focusedChart >= 0 ? focusedChart : 0;
       handleSymbolChange(target, symbol);
     },
     [focusedChart, handleSymbolChange]
   );
 
-  const handleWatchlistAdd = useCallback((item: WatchlistItem) => {
-    setWatchlist((prev) => [...prev, item]);
+  const handleAddToGroup = useCallback(
+    (groupId: string, item: WatchlistItem) => {
+      setGroups((prev) =>
+        prev.map((g) =>
+          g.id === groupId ? { ...g, items: [...g.items, item] } : g
+        )
+      );
+      if (item.displayName) {
+        setDisplayNames((prev) => ({
+          ...prev,
+          [item.symbol]: item.displayName,
+        }));
+      }
+    },
+    []
+  );
+
+  const handleRemoveItem = useCallback(
+    (groupId: string, itemIndex: number) => {
+      setGroups((prev) =>
+        prev.map((g) =>
+          g.id === groupId
+            ? { ...g, items: g.items.filter((_, i) => i !== itemIndex) }
+            : g
+        )
+      );
+    },
+    []
+  );
+
+  const handleUpdateDisplayName = useCallback(
+    (groupId: string, itemIndex: number, newName: string) => {
+      setGroups((prev) =>
+        prev.map((g) => {
+          if (g.id !== groupId) return g;
+          const newItems = g.items.map((item, i) =>
+            i === itemIndex ? { ...item, displayName: newName } : item
+          );
+          const item = g.items[itemIndex];
+          if (item) {
+            setDisplayNames((dn) => ({ ...dn, [item.symbol]: newName }));
+          }
+          return { ...g, items: newItems };
+        })
+      );
+    },
+    []
+  );
+
+  const handleMoveItem = useCallback(
+    (fromGroupId: string, itemIndex: number, toGroupId: string) => {
+      setGroups((prev) => {
+        const fromGroup = prev.find((g) => g.id === fromGroupId);
+        if (!fromGroup) return prev;
+        const item = fromGroup.items[itemIndex];
+        if (!item) return prev;
+
+        return prev.map((g) => {
+          if (g.id === fromGroupId) {
+            return { ...g, items: g.items.filter((_, i) => i !== itemIndex) };
+          }
+          if (g.id === toGroupId) {
+            return { ...g, items: [...g.items, item] };
+          }
+          return g;
+        });
+      });
+    },
+    []
+  );
+
+  const handleToggleGroup = useCallback((groupId: string) => {
+    setCollapsedGroups((prev) =>
+      prev.includes(groupId)
+        ? prev.filter((id) => id !== groupId)
+        : [...prev, groupId]
+    );
   }, []);
 
-  const handleWatchlistRemove = useCallback((index: number) => {
-    setWatchlist((prev) => prev.filter((_, i) => i !== index));
+  const handleRenameGroup = useCallback(
+    (groupId: string, newName: string) => {
+      setGroups((prev) =>
+        prev.map((g) => (g.id === groupId ? { ...g, name: newName } : g))
+      );
+    },
+    []
+  );
+
+  const handleDeleteGroup = useCallback((groupId: string) => {
+    setGroups((prev) => {
+      const group = prev.find((g) => g.id === groupId);
+      if (!group || group.items.length > 0) return prev;
+      return prev.filter((g) => g.id !== groupId);
+    });
+    setCollapsedGroups((prev) => prev.filter((id) => id !== groupId));
   }, []);
+
+  const handleAddGroup = useCallback((name: string) => {
+    const newGroup: WatchlistGroup = {
+      id: generateGroupId(),
+      name,
+      items: [],
+    };
+    setGroups((prev) => [...prev, newGroup]);
+  }, []);
+
+  // Close fullscreen on Escape
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && fullscreenChart !== null) {
+        setFullscreenChart(null);
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [fullscreenChart]);
 
   // Don't render charts until client-side hydration is complete
   if (!mounted) {
-    return <div className="flex h-screen items-center justify-center bg-[#131722] text-zinc-500">読み込み中...</div>;
+    return (
+      <div className="flex h-screen items-center justify-center bg-[#131722] text-zinc-500">
+        読み込み中...
+      </div>
+    );
   }
 
   const visibleSymbols = symbols.slice(0, layout.count);
@@ -407,10 +1239,18 @@ export default function Home() {
       <div className="relative flex min-h-0 flex-1">
         {/* Watchlist Sidebar */}
         <WatchlistSidebar
-          watchlist={watchlist}
+          groups={groups}
+          collapsedGroups={collapsedGroups}
           onSelect={handleWatchlistSelect}
-          onAdd={handleWatchlistAdd}
-          onRemove={handleWatchlistRemove}
+          onAddToGroup={handleAddToGroup}
+          onRemoveItem={handleRemoveItem}
+          onUpdateDisplayName={handleUpdateDisplayName}
+          onMoveItem={handleMoveItem}
+          onToggleGroup={handleToggleGroup}
+          onRenameGroup={handleRenameGroup}
+          onDeleteGroup={handleDeleteGroup}
+          onAddGroup={handleAddGroup}
+          displayNames={displayNames}
           open={sidebarOpen}
           onToggle={() => setSidebarOpen((p) => !p)}
         />
@@ -425,9 +1265,14 @@ export default function Home() {
           }}
         >
           {visibleSymbols.map((symbol, i) => (
-            <div key={`${i}-${symbol}`} className="min-h-0 min-w-0 bg-[#131722]">
+            <div
+              key={`${i}-${symbol}`}
+              className="min-h-0 min-w-0 bg-[#131722]"
+              onDoubleClick={() => setFullscreenChart(i)}
+            >
               <TradingViewChart
                 symbol={symbol}
+                displayName={displayNames[symbol] || ""}
                 index={i}
                 timeRange={TIME_RANGES[timeRangeIndex]}
                 refreshKey={refreshKey}
@@ -439,6 +1284,38 @@ export default function Home() {
           ))}
         </main>
       </div>
+
+      {/* Fullscreen chart modal */}
+      {fullscreenChart !== null && visibleSymbols[fullscreenChart] && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80"
+          onClick={() => setFullscreenChart(null)}
+        >
+          <div
+            className="relative"
+            style={{ width: "90vw", height: "90vh" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => setFullscreenChart(null)}
+              className="absolute -right-2 -top-2 z-10 rounded-full bg-zinc-700 px-2 py-1 text-sm text-zinc-300 shadow-lg hover:bg-zinc-600 hover:text-white"
+              title="閉じる (Esc)"
+            >
+              ✕
+            </button>
+            <TradingViewChart
+              symbol={visibleSymbols[fullscreenChart]}
+              displayName={displayNames[visibleSymbols[fullscreenChart]] || ""}
+              index={fullscreenChart}
+              timeRange={TIME_RANGES[timeRangeIndex]}
+              refreshKey={refreshKey}
+              isFocused={true}
+              onFocus={() => {}}
+              onSymbolChange={(s) => handleSymbolChange(fullscreenChart, s)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
