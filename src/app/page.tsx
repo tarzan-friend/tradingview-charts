@@ -467,11 +467,13 @@ function PortfolioSummary({
   currentPrices,
   currencyMap,
   usdJpyRate,
+  activeGroupId,
 }: {
   groups: WatchlistGroup[];
   currentPrices: Record<string, number>;
   currencyMap: Record<string, string>;
   usdJpyRate: number | null;
+  activeGroupId: string | null;
 }) {
   let totalPlUsd = 0;
   let totalCostUsd = 0;
@@ -479,7 +481,11 @@ function PortfolioSummary({
   let totalCostJpy = 0;
   let hasHolding = false;
 
-  for (const group of groups) {
+  const targetGroups = activeGroupId
+    ? groups.filter((g) => g.id === activeGroupId)
+    : groups;
+
+  for (const group of targetGroups) {
     for (const item of group.items) {
       if (!item.holding || item.holding.shares <= 0) continue;
       const price = currentPrices[item.symbol];
@@ -531,7 +537,11 @@ function PortfolioSummary({
       className="mx-2 mb-1 rounded px-2 py-1.5"
       style={{ backgroundColor: bg, border: `1px solid ${color}30` }}
     >
-      <div className="text-[9px] text-zinc-500">総損益</div>
+      <div className="text-[9px] text-zinc-500">
+        {activeGroupId
+          ? `${targetGroups[0]?.name ?? ""}の損益`
+          : "総損益"}
+      </div>
       <div className="flex flex-wrap items-center gap-x-1 text-[11px] font-semibold" style={{ color }}>
         <span>{formatVal(totalPlUsd, "$")}</span>
         <span className="text-[10px] font-normal">({totalPct >= 0 ? "+" : ""}{totalPct.toFixed(1)}%)</span>
@@ -1736,6 +1746,7 @@ function WatchlistSidebar({
           currentPrices={currentPrices}
           currencyMap={currencyMap}
           usdJpyRate={usdJpyRate}
+          activeGroupId={activeGroupId}
         />
 
         {/* Groups with DnD */}
