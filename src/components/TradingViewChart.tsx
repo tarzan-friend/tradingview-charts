@@ -7,7 +7,7 @@ import {
   LineStyle,
   AreaSeries,
 } from "lightweight-charts";
-import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
+import type { IChartApi, Time } from "lightweight-charts";
 
 export interface TimeRange {
   label: string;
@@ -23,6 +23,12 @@ export const TIME_RANGES: TimeRange[] = [
   { label: "1Y", interval: "1wk", range: "1y" },
 ];
 
+export interface HoldingInfo {
+  shares: number;
+  avgCostUsd: number;
+  avgCostJpy: number;
+}
+
 interface TradingViewChartProps {
   symbol: string;
   displayName: string;
@@ -32,6 +38,10 @@ interface TradingViewChartProps {
   isFocused: boolean;
   onFocus: () => void;
   onSymbolChange: (symbol: string) => void;
+  onPriceUpdate?: (symbol: string, price: number) => void;
+  holding?: HoldingInfo;
+  usdJpyRate?: number;
+  memo?: string;
 }
 
 interface ChartDataPoint {
@@ -64,6 +74,55 @@ function ChangeBadge({ changePercent }: { changePercent: number | null }) {
   );
 }
 
+function formatCurrency(value: number, prefix: string): string {
+  const abs = Math.abs(value);
+  const sign = value >= 0 ? "+" : "-";
+  if (prefix === "¥") {
+    return `${sign}${prefix}${Math.round(abs).toLocaleString("ja-JP")}`;
+  }
+  if (abs >= 1000000) {
+    return `${sign}${prefix}${(abs / 1000000).toFixed(1)}M`;
+  }
+  if (abs >= 1000) {
+    return `${sign}${prefix}${(abs / 1000).toFixed(abs >= 10000 ? 0 : 1)}K`;
+  }
+  return `${sign}${prefix}${abs.toFixed(abs < 10 ? 2 : 0)}`;
+}
+
+function HoldingBadge({
+  holding,
+  currentPrice,
+  usdJpyRate,
+}: {
+  holding: HoldingInfo;
+  currentPrice: number | null;
+  usdJpyRate?: number;
+}) {
+  if (!currentPrice || holding.shares <= 0) return null;
+
+  const plUsd = (currentPrice - holding.avgCostUsd) * holding.shares;
+  const plPct = ((currentPrice - holding.avgCostUsd) / holding.avgCostUsd) * 100;
+  const isPositive = plUsd >= 0;
+  const color = isPositive ? "#00C805" : "#FF3B30";
+
+  let plJpyStr = "";
+  if (usdJpyRate && holding.avgCostJpy > 0) {
+    const currentJpy = currentPrice * usdJpyRate;
+    const plJpy = (currentJpy - holding.avgCostJpy) * holding.shares;
+    plJpyStr = ` | ${formatCurrency(plJpy, "¥")}`;
+  }
+
+  return (
+    <span
+      className="ml-1 truncate text-[9px] font-medium"
+      style={{ color }}
+      title={`${holding.shares}株 | ${formatCurrency(plUsd, "$")} (${plPct >= 0 ? "+" : ""}${plPct.toFixed(1)}%)${plJpyStr}`}
+    >
+      {holding.shares}株 | {formatCurrency(plUsd, "$")} ({plPct >= 0 ? "+" : ""}{plPct.toFixed(1)}%){plJpyStr}
+    </span>
+  );
+}
+
 export default function TradingViewChart({
   symbol,
   displayName,
@@ -73,6 +132,10 @@ export default function TradingViewChart({
   isFocused,
   onFocus,
   onSymbolChange,
+  onPriceUpdate,
+  holding,
+  usdJpyRate,
+  memo,
 }: TradingViewChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -83,8 +146,11 @@ export default function TradingViewChart({
   const [editing, setEditing] = useState(false);
   const [input, setInput] = useState(symbol);
   const [changePercent, setChangePercent] = useState<number | null>(null);
+  const [currentPrice, setCurrentPrice] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showMemo, setShowMemo] = useState(false);
+  const memoPopupRef = useRef<HTMLDivElement>(null);
 
   // Fetch chart data from our API proxy
   const fetchData = useCallback(async () => {
@@ -99,8 +165,15 @@ export default function TradingViewChart({
 
       const chartData: ChartDataPoint[] = data.chartData || [];
       const prevClose: number | null = data.prevClose ?? null;
+      const price: number | null = data.currentPrice ?? null;
 
       setChangePercent(data.changePercent ?? null);
+      setCurrentPrice(price);
+
+      // Notify parent of price update
+      if (price !== null && onPriceUpdate) {
+        onPriceUpdate(symbol, price);
+      }
 
       if (seriesRef.current && chartRef.current) {
         seriesRef.current.setData(chartData);
@@ -130,7 +203,7 @@ export default function TradingViewChart({
     } finally {
       setLoading(false);
     }
-  }, [symbol, timeRange]);
+  }, [symbol, timeRange, onPriceUpdate]);
 
   // Create chart
   useEffect(() => {
@@ -219,6 +292,18 @@ export default function TradingViewChart({
     }
   };
 
+  // Close memo popup on outside click
+  useEffect(() => {
+    if (!showMemo) return;
+    const handler = (e: MouseEvent) => {
+      if (memoPopupRef.current && !memoPopupRef.current.contains(e.target as Node)) {
+        setShowMemo(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showMemo]);
+
   // Sync input when symbol changes externally
   useEffect(() => {
     setInput(symbol);
@@ -265,12 +350,42 @@ export default function TradingViewChart({
                 setInput(symbol);
                 setEditing(true);
               }}
-              className="truncate text-xs font-medium text-zinc-300 hover:text-white"
+              className="shrink-0 truncate text-xs font-medium text-zinc-300 hover:text-white"
               title={`${symbol} — クリックして銘柄を変更`}
             >
               {displayName || symbol}
             </button>
             <ChangeBadge changePercent={changePercent} />
+            {holding && (
+              <HoldingBadge
+                holding={holding}
+                currentPrice={currentPrice}
+                usdJpyRate={usdJpyRate}
+              />
+            )}
+            {memo && (
+              <div className="relative shrink-0">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowMemo((p) => !p);
+                  }}
+                  className="ml-1 text-[10px] hover:opacity-80"
+                  title="メモを表示"
+                >
+                  📝
+                </button>
+                {showMemo && (
+                  <div
+                    ref={memoPopupRef}
+                    className="absolute left-0 top-6 z-50 max-w-[250px] rounded border border-zinc-600 bg-[#1e222d] p-2 shadow-xl"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="whitespace-pre-wrap text-[11px] text-zinc-300">{memo}</div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>

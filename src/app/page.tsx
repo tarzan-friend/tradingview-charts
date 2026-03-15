@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import TradingViewChart, { TIME_RANGES } from "@/components/TradingViewChart";
+import type { HoldingInfo } from "@/components/TradingViewChart";
 import {
   DndContext,
   DragOverlay,
@@ -27,6 +28,8 @@ interface WatchlistItem {
   symbol: string;
   name: string;
   displayName: string;
+  holding?: HoldingInfo;
+  memo?: string;
 }
 
 interface WatchlistGroup {
@@ -111,7 +114,7 @@ const DEFAULT_GROUPS: WatchlistGroup[] = [
 
 const STORAGE_KEY = "tradingview-charts-state";
 const STORAGE_VERSION_KEY = "tradingview-charts-version";
-const STORAGE_VERSION = "v11";
+const STORAGE_VERSION = "v13";
 
 const QUICK_ADD_ITEMS: WatchlistItem[] = [
   { symbol: "日経平均", name: "日経225", displayName: "日経225" },
@@ -120,6 +123,33 @@ const QUICK_ADD_ITEMS: WatchlistItem[] = [
   { symbol: "GOLD", name: "ゴールド", displayName: "ゴールド" },
   { symbol: "VIX", name: "恐怖指数", displayName: "恐怖指数" },
 ];
+
+interface PriceAlert {
+  id: string;
+  symbol: string;
+  displayName: string;
+  targetPrice: number;
+  condition: "above" | "below";
+  triggered: boolean;
+  createdAt: number;
+}
+
+const ALERTS_STORAGE_KEY = "tradingview-alerts";
+
+function loadAlerts(): PriceAlert[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(ALERTS_STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return [];
+}
+
+function saveAlerts(alerts: PriceAlert[]) {
+  try {
+    localStorage.setItem(ALERTS_STORAGE_KEY, JSON.stringify(alerts));
+  } catch {}
+}
 
 interface AppState {
   symbols: string[];
@@ -310,6 +340,496 @@ function AddMenu({
   );
 }
 
+// --- Holding Edit Modal ---
+function HoldingModal({
+  item,
+  onSave,
+  onClose,
+}: {
+  item: WatchlistItem;
+  onSave: (holding: HoldingInfo | undefined) => void;
+  onClose: () => void;
+}) {
+  const [shares, setShares] = useState(item.holding?.shares?.toString() || "");
+  const [avgCostUsd, setAvgCostUsd] = useState(item.holding?.avgCostUsd?.toString() || "");
+  const [avgCostJpy, setAvgCostJpy] = useState(item.holding?.avgCostJpy?.toString() || "");
+
+  const handleSave = () => {
+    const s = parseFloat(shares);
+    const usd = parseFloat(avgCostUsd);
+    const jpy = parseFloat(avgCostJpy);
+
+    if (!s || s <= 0) {
+      onSave(undefined); // Clear holding
+    } else {
+      onSave({
+        shares: s,
+        avgCostUsd: usd || 0,
+        avgCostJpy: jpy || 0,
+      });
+    }
+    onClose();
+  };
+
+  const handleClear = () => {
+    onSave(undefined);
+    onClose();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60"
+      onClick={onClose}
+    >
+      <div
+        className="w-[340px] rounded-lg border border-zinc-600 bg-[#1e222d] p-4 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="mb-3 text-sm font-semibold text-zinc-200">
+          保有情報を編集
+        </h3>
+        <div className="mb-1 text-[10px] text-zinc-400">
+          {item.displayName || item.name || item.symbol}
+          <span className="ml-1 text-zinc-600">{item.symbol}</span>
+        </div>
+
+        <div className="mt-3 space-y-2">
+          <div>
+            <label className="mb-0.5 block text-[10px] text-zinc-400">保有株数</label>
+            <input
+              autoFocus
+              type="number"
+              value={shares}
+              onChange={(e) => setShares(e.target.value)}
+              placeholder="0"
+              min="0"
+              step="1"
+              className="h-8 w-full rounded border border-zinc-600 bg-[#131722] px-2 text-xs text-zinc-200 outline-none focus:border-blue-500"
+            />
+          </div>
+          <div>
+            <label className="mb-0.5 block text-[10px] text-zinc-400">平均取得単価（USD）</label>
+            <input
+              type="number"
+              value={avgCostUsd}
+              onChange={(e) => setAvgCostUsd(e.target.value)}
+              placeholder="0.00"
+              min="0"
+              step="0.01"
+              className="h-8 w-full rounded border border-zinc-600 bg-[#131722] px-2 text-xs text-zinc-200 outline-none focus:border-blue-500"
+            />
+          </div>
+          <div>
+            <label className="mb-0.5 block text-[10px] text-zinc-400">平均取得単価（JPY）</label>
+            <input
+              type="number"
+              value={avgCostJpy}
+              onChange={(e) => setAvgCostJpy(e.target.value)}
+              placeholder="0"
+              min="0"
+              step="1"
+              className="h-8 w-full rounded border border-zinc-600 bg-[#131722] px-2 text-xs text-zinc-200 outline-none focus:border-blue-500"
+            />
+          </div>
+        </div>
+
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            onClick={handleSave}
+            className="flex-1 rounded bg-blue-600 py-1.5 text-xs font-medium text-white hover:bg-blue-500"
+          >
+            保存
+          </button>
+          <button
+            onClick={onClose}
+            className="flex-1 rounded border border-zinc-600 py-1.5 text-xs text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+          >
+            キャンセル
+          </button>
+          {item.holding && (
+            <button
+              onClick={handleClear}
+              className="rounded border border-red-800 px-3 py-1.5 text-xs text-red-400 hover:bg-red-900/30"
+              title="保有情報をクリア"
+            >
+              クリア
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- Portfolio Summary ---
+function PortfolioSummary({
+  groups,
+  currentPrices,
+  usdJpyRate,
+}: {
+  groups: WatchlistGroup[];
+  currentPrices: Record<string, number>;
+  usdJpyRate: number | null;
+}) {
+  let totalPlUsd = 0;
+  let totalCostUsd = 0;
+  let totalPlJpy = 0;
+  let hasHolding = false;
+
+  for (const group of groups) {
+    for (const item of group.items) {
+      if (!item.holding || item.holding.shares <= 0) continue;
+      const price = currentPrices[item.symbol];
+      if (!price) continue;
+      hasHolding = true;
+      const plUsd = (price - item.holding.avgCostUsd) * item.holding.shares;
+      totalPlUsd += plUsd;
+      totalCostUsd += item.holding.avgCostUsd * item.holding.shares;
+
+      if (usdJpyRate && item.holding.avgCostJpy > 0) {
+        const currentJpy = price * usdJpyRate;
+        totalPlJpy += (currentJpy - item.holding.avgCostJpy) * item.holding.shares;
+      }
+    }
+  }
+
+  if (!hasHolding) return null;
+
+  const totalPct = totalCostUsd > 0 ? (totalPlUsd / totalCostUsd) * 100 : 0;
+  const isPositive = totalPlUsd >= 0;
+  const color = isPositive ? "#00C805" : "#FF3B30";
+  const bg = isPositive ? "#00C80510" : "#FF3B3010";
+
+  const formatVal = (v: number, prefix: string) => {
+    const abs = Math.abs(v);
+    const sign = v >= 0 ? "+" : "-";
+    if (prefix === "¥") {
+      return `${sign}${prefix}${Math.round(abs).toLocaleString("ja-JP")}`;
+    }
+    if (abs >= 1000000) return `${sign}${prefix}${(abs / 1000000).toFixed(1)}M`;
+    if (abs >= 1000) return `${sign}${prefix}${(abs / 1000).toFixed(abs >= 10000 ? 0 : 1)}K`;
+    return `${sign}${prefix}${abs.toFixed(abs < 10 ? 2 : 0)}`;
+  };
+
+  return (
+    <div
+      className="mx-2 mb-1 rounded px-2 py-1.5"
+      style={{ backgroundColor: bg, border: `1px solid ${color}30` }}
+    >
+      <div className="text-[9px] text-zinc-500">総損益</div>
+      <div className="flex flex-wrap items-center gap-x-1 text-[11px] font-semibold" style={{ color }}>
+        <span>{formatVal(totalPlUsd, "$")}</span>
+        <span className="text-[10px] font-normal">({totalPct >= 0 ? "+" : ""}{totalPct.toFixed(1)}%)</span>
+        {usdJpyRate && totalPlJpy !== 0 && (
+          <>
+            <span className="text-zinc-600">|</span>
+            <span>{formatVal(totalPlJpy, "¥")}</span>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- Alert Modal ---
+function AlertModal({
+  symbol,
+  displayName,
+  currentPrice,
+  onSave,
+  onClose,
+}: {
+  symbol: string;
+  displayName: string;
+  currentPrice: number | null;
+  onSave: (alert: PriceAlert) => void;
+  onClose: () => void;
+}) {
+  const [targetPrice, setTargetPrice] = useState(currentPrice?.toString() || "");
+  const [condition, setCondition] = useState<"above" | "below">("above");
+
+  const handleSave = () => {
+    const price = parseFloat(targetPrice);
+    if (!price || price <= 0) return;
+    onSave({
+      id: `alert-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      symbol,
+      displayName,
+      targetPrice: price,
+      condition,
+      triggered: false,
+      createdAt: Date.now(),
+    });
+    onClose();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60"
+      onClick={onClose}
+    >
+      <div
+        className="w-[340px] rounded-lg border border-zinc-600 bg-[#1e222d] p-4 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="mb-3 text-sm font-semibold text-zinc-200">
+          アラートを設定
+        </h3>
+        <div className="mb-1 text-[10px] text-zinc-400">
+          {displayName || symbol}
+          <span className="ml-1 text-zinc-600">{symbol}</span>
+          {currentPrice && (
+            <span className="ml-1 text-zinc-500">現在値: ${currentPrice.toFixed(2)}</span>
+          )}
+        </div>
+
+        <div className="mt-3 space-y-2">
+          <div>
+            <label className="mb-0.5 block text-[10px] text-zinc-400">目標価格</label>
+            <input
+              autoFocus
+              type="number"
+              value={targetPrice}
+              onChange={(e) => setTargetPrice(e.target.value)}
+              placeholder="0.00"
+              min="0"
+              step="0.01"
+              className="h-8 w-full rounded border border-zinc-600 bg-[#131722] px-2 text-xs text-zinc-200 outline-none focus:border-blue-500"
+            />
+          </div>
+          <div>
+            <label className="mb-0.5 block text-[10px] text-zinc-400">条件</label>
+            <select
+              value={condition}
+              onChange={(e) => setCondition(e.target.value as "above" | "below")}
+              className="h-8 w-full rounded border border-zinc-600 bg-[#131722] px-2 text-xs text-zinc-200 outline-none focus:border-blue-500"
+            >
+              <option value="above">以上になったら</option>
+              <option value="below">以下になったら</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            onClick={handleSave}
+            className="flex-1 rounded bg-blue-600 py-1.5 text-xs font-medium text-white hover:bg-blue-500"
+          >
+            設定
+          </button>
+          <button
+            onClick={onClose}
+            className="flex-1 rounded border border-zinc-600 py-1.5 text-xs text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+          >
+            キャンセル
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- Memo Edit Modal ---
+function MemoModal({
+  item,
+  onSave,
+  onClose,
+}: {
+  item: WatchlistItem;
+  onSave: (memo: string | undefined) => void;
+  onClose: () => void;
+}) {
+  const [memo, setMemo] = useState(item.memo || "");
+
+  const handleSave = () => {
+    onSave(memo.trim() || undefined);
+    onClose();
+  };
+
+  const handleClear = () => {
+    onSave(undefined);
+    onClose();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60"
+      onClick={onClose}
+    >
+      <div
+        className="w-[380px] rounded-lg border border-zinc-600 bg-[#1e222d] p-4 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="mb-3 text-sm font-semibold text-zinc-200">
+          メモを編集
+        </h3>
+        <div className="mb-1 text-[10px] text-zinc-400">
+          {item.displayName || item.name || item.symbol}
+          <span className="ml-1 text-zinc-600">{item.symbol}</span>
+        </div>
+
+        <div className="mt-3">
+          <textarea
+            autoFocus
+            value={memo}
+            onChange={(e) => setMemo(e.target.value)}
+            placeholder="投資メモ、目標株価、買い理由など"
+            rows={5}
+            className="w-full resize-none rounded border border-zinc-600 bg-[#131722] px-2 py-1.5 text-xs text-zinc-200 outline-none focus:border-blue-500"
+          />
+        </div>
+
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            onClick={handleSave}
+            className="flex-1 rounded bg-blue-600 py-1.5 text-xs font-medium text-white hover:bg-blue-500"
+          >
+            保存
+          </button>
+          <button
+            onClick={onClose}
+            className="flex-1 rounded border border-zinc-600 py-1.5 text-xs text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+          >
+            キャンセル
+          </button>
+          {item.memo && (
+            <button
+              onClick={handleClear}
+              className="rounded border border-red-800 px-3 py-1.5 text-xs text-red-400 hover:bg-red-900/30"
+              title="メモをクリア"
+            >
+              クリア
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- Memo Popup ---
+function MemoPopup({
+  memo,
+  onClose,
+}: {
+  memo: string;
+  onClose: () => void;
+}) {
+  const popupRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (popupRef.current && !popupRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose]);
+
+  return (
+    <div
+      ref={popupRef}
+      className="absolute left-2 top-8 z-50 max-w-[280px] rounded border border-zinc-600 bg-[#1e222d] p-2 shadow-xl"
+    >
+      <div className="whitespace-pre-wrap text-[11px] text-zinc-300">{memo}</div>
+    </div>
+  );
+}
+
+// --- Memo List Section ---
+function MemoList({
+  groups,
+  displayNames,
+  onSelect,
+}: {
+  groups: WatchlistGroup[];
+  displayNames: Record<string, string>;
+  onSelect: (symbol: string) => void;
+}) {
+  const itemsWithMemo: { item: WatchlistItem; label: string }[] = [];
+  for (const group of groups) {
+    for (const item of group.items) {
+      if (item.memo) {
+        const label = item.displayName || displayNames[item.symbol] || item.name || item.symbol;
+        itemsWithMemo.push({ item, label });
+      }
+    }
+  }
+
+  if (itemsWithMemo.length === 0) return null;
+
+  return (
+    <div className="shrink-0 border-t border-zinc-700 px-3 py-2">
+      <div className="mb-1 text-[10px] font-medium text-zinc-500">
+        メモ ({itemsWithMemo.length})
+      </div>
+      <div className="max-h-[120px] space-y-0.5 overflow-y-auto">
+        {itemsWithMemo.map(({ item, label }) => (
+          <button
+            key={item.symbol}
+            onClick={() => onSelect(item.symbol)}
+            className="group flex w-full items-start gap-1 rounded px-1.5 py-1 text-left text-[10px] text-zinc-300 hover:bg-[#2a2e39]"
+          >
+            <span className="shrink-0">📝</span>
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-medium">{label}</div>
+              <div className="truncate text-zinc-500">
+                {item.memo!.length > 50 ? item.memo!.slice(0, 50) + "…" : item.memo}
+              </div>
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// --- Alert List ---
+function AlertList({
+  alerts,
+  onDelete,
+}: {
+  alerts: PriceAlert[];
+  onDelete: (id: string) => void;
+}) {
+  if (alerts.length === 0) return null;
+
+  return (
+    <div className="shrink-0 border-t border-zinc-700 px-3 py-2">
+      <div className="mb-1 text-[10px] font-medium text-zinc-500">
+        アラート ({alerts.filter((a) => !a.triggered).length}/{alerts.length})
+      </div>
+      <div className="max-h-[120px] space-y-0.5 overflow-y-auto">
+        {alerts.map((alert) => (
+          <div
+            key={alert.id}
+            className={`group flex items-center gap-1 rounded px-1.5 py-1 text-[10px] ${
+              alert.triggered
+                ? "text-zinc-600 line-through"
+                : "text-zinc-300"
+            }`}
+          >
+            <span className={`shrink-0 ${alert.triggered ? "text-zinc-700" : alert.condition === "above" ? "text-green-500" : "text-red-500"}`}>
+              {alert.condition === "above" ? "▲" : "▼"}
+            </span>
+            <span className="min-w-0 flex-1 truncate">
+              {alert.displayName || alert.symbol} ${alert.targetPrice.toFixed(2)}
+            </span>
+            <button
+              onClick={() => onDelete(alert.id)}
+              className="hidden shrink-0 text-zinc-500 hover:text-red-400 group-hover:block"
+              title="削除"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // --- Sortable Item Component ---
 function SortableWatchlistItem({
   item,
@@ -407,16 +927,21 @@ function SortableWatchlistItem({
           />
         ) : (
           <>
-            <div
-              className="truncate text-xs font-medium text-zinc-200 hover:text-blue-400"
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!isDragOverlay) setEditingId(item.symbol);
-              }}
-              title="クリックして名前を編集 / 右クリックでメニュー"
-              style={{ cursor: "text" }}
-            >
-              {label}
+            <div className="flex items-center gap-0.5">
+              <div
+                className="truncate text-xs font-medium text-zinc-200 hover:text-blue-400"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!isDragOverlay) setEditingId(item.symbol);
+                }}
+                title="クリックして名前を編集 / 右クリックでメニュー"
+                style={{ cursor: "text" }}
+              >
+                {label}
+              </div>
+              {item.memo && (
+                <span className="shrink-0 text-[10px]" title={item.memo}>📝</span>
+              )}
             </div>
             {label !== item.symbol && (
               <div className="truncate text-[10px] text-zinc-500">
@@ -447,8 +972,10 @@ function SortableGroupHeader({
   group,
   isCollapsed,
   isEditingGroup,
+  isActiveGroup,
   setEditingGroupId,
   onToggleGroup,
+  onApplyGroup,
   setAddingToGroupId,
   onRenameGroup,
   onContextMenu,
@@ -456,8 +983,10 @@ function SortableGroupHeader({
   group: WatchlistGroup;
   isCollapsed: boolean;
   isEditingGroup: boolean;
+  isActiveGroup: boolean;
   setEditingGroupId: (id: string | null) => void;
   onToggleGroup: (id: string) => void;
+  onApplyGroup: (groupId: string) => void;
   setAddingToGroupId: (id: string) => void;
   onRenameGroup: (id: string, name: string) => void;
   onContextMenu: (e: React.MouseEvent, groupId: string) => void;
@@ -481,8 +1010,7 @@ function SortableGroupHeader({
     <div
       ref={setNodeRef}
       style={style}
-      className="group flex cursor-pointer items-center gap-1 border-b border-zinc-700/50 bg-[#1a1e2e] px-2 py-1.5 hover:bg-[#252932]"
-      onClick={() => onToggleGroup(group.id)}
+      className="group flex items-center gap-1 border-b border-zinc-700/50 bg-[#1a1e2e] px-2 py-1.5 hover:bg-[#252932]"
       onContextMenu={(e) => onContextMenu(e, group.id)}
     >
       {/* Drag handle for group */}
@@ -494,9 +1022,17 @@ function SortableGroupHeader({
       >
         ⠿
       </span>
-      <span className="text-[10px] text-zinc-500">
+      {/* Collapse toggle - only this icon toggles collapse */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleGroup(group.id);
+        }}
+        className="flex-shrink-0 text-[10px] text-zinc-500 hover:text-zinc-300"
+        title={isCollapsed ? "展開" : "折りたたむ"}
+      >
         {isCollapsed ? "▶" : "▼"}
-      </span>
+      </button>
       {isEditingGroup ? (
         <input
           autoFocus
@@ -520,25 +1056,48 @@ function SortableGroupHeader({
         />
       ) : (
         <span
-          className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-400"
+          className={`min-w-0 flex-1 cursor-pointer truncate text-xs ${
+            isActiveGroup
+              ? "font-semibold text-white"
+              : "font-medium text-zinc-400 hover:text-zinc-200"
+          }`}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (group.items.length > 0) {
+              onApplyGroup(group.id);
+            }
+          }}
           onDoubleClick={(e) => {
             e.stopPropagation();
             setEditingGroupId(group.id);
           }}
-          title="ダブルクリックで名前を編集 / 右クリックでメニュー"
+          title={group.items.length > 0 ? "クリックで一括表示 / ダブルクリックで名前を編集" : "ダブルクリックで名前を編集"}
         >
           {group.name}
-          <span className="ml-1 text-[10px] text-zinc-600">
+          <span className={`ml-1 text-[10px] ${isActiveGroup ? "text-zinc-400" : "text-zinc-600"}`}>
             ({group.items.length})
           </span>
         </span>
+      )}
+      {/* Apply group with auto-layout button */}
+      {group.items.length > 0 && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onApplyGroup(group.id);
+          }}
+          className="hidden flex-shrink-0 rounded px-1 text-xs text-zinc-500 hover:bg-blue-600/30 hover:text-blue-400 group-hover:block"
+          title={`グループの銘柄で一括表示（レイアウト自動調整: ${group.items.length}枚）`}
+        >
+          ⊞
+        </button>
       )}
       <button
         onClick={(e) => {
           e.stopPropagation();
           setAddingToGroupId(group.id);
         }}
-        className="hidden rounded px-1 text-xs text-zinc-500 hover:bg-[#363a45] hover:text-white group-hover:block"
+        className="hidden flex-shrink-0 rounded px-1 text-xs text-zinc-500 hover:bg-[#363a45] hover:text-white group-hover:block"
         title="このグループに銘柄を追加"
       >
         +
@@ -552,34 +1111,52 @@ function SortableGroupHeader({
 function WatchlistSidebar({
   groups,
   collapsedGroups,
+  activeGroupId,
+  currentPrices,
+  usdJpyRate,
+  alerts,
   onSelect,
   onAddToGroup,
   onRemoveItem,
   onUpdateDisplayName,
+  onUpdateHolding,
+  onUpdateMemo,
   onMoveItem,
   onReorderItem,
   onReorderGroups,
   onToggleGroup,
+  onApplyGroup,
   onRenameGroup,
   onDeleteGroup,
   onAddGroup,
+  onAddAlert,
+  onDeleteAlert,
   displayNames,
   open,
   onToggle,
 }: {
   groups: WatchlistGroup[];
   collapsedGroups: string[];
+  activeGroupId: string | null;
+  currentPrices: Record<string, number>;
+  usdJpyRate: number | null;
+  alerts: PriceAlert[];
   onSelect: (symbol: string) => void;
   onAddToGroup: (groupId: string, item: WatchlistItem) => void;
   onRemoveItem: (groupId: string, itemIndex: number) => void;
   onUpdateDisplayName: (groupId: string, itemIndex: number, newName: string) => void;
+  onUpdateHolding: (groupId: string, itemIndex: number, holding: HoldingInfo | undefined) => void;
+  onUpdateMemo: (groupId: string, itemIndex: number, memo: string | undefined) => void;
   onMoveItem: (fromGroupId: string, itemIndex: number, toGroupId: string) => void;
   onReorderItem: (groupId: string, fromIndex: number, toIndex: number) => void;
   onReorderGroups: (fromIndex: number, toIndex: number) => void;
   onToggleGroup: (groupId: string) => void;
+  onApplyGroup: (groupId: string) => void;
   onRenameGroup: (groupId: string, newName: string) => void;
   onDeleteGroup: (groupId: string) => void;
   onAddGroup: (name: string) => void;
+  onAddAlert: (alert: PriceAlert) => void;
+  onDeleteAlert: (id: string) => void;
   displayNames: Record<string, string>;
   open: boolean;
   onToggle: () => void;
@@ -602,6 +1179,20 @@ function WatchlistSidebar({
   } | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [overGroupId, setOverGroupId] = useState<string | null>(null);
+  const [holdingEditTarget, setHoldingEditTarget] = useState<{
+    groupId: string;
+    itemIndex: number;
+    item: WatchlistItem;
+  } | null>(null);
+  const [alertEditTarget, setAlertEditTarget] = useState<{
+    symbol: string;
+    displayName: string;
+  } | null>(null);
+  const [memoEditTarget, setMemoEditTarget] = useState<{
+    groupId: string;
+    itemIndex: number;
+    item: WatchlistItem;
+  } | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const topMenuBtnRef = useRef<HTMLButtonElement | null>(null);
 
@@ -885,6 +1476,55 @@ function WatchlistSidebar({
     });
 
     menuItems.push({
+      label: "保有情報を編集",
+      separator: true,
+      onClick: () => {
+        if (contextMenu.itemIndex !== undefined) {
+          const group = groups.find((g) => g.id === contextMenu.groupId);
+          if (group && group.items[contextMenu.itemIndex]) {
+            setHoldingEditTarget({
+              groupId: contextMenu.groupId,
+              itemIndex: contextMenu.itemIndex,
+              item: group.items[contextMenu.itemIndex],
+            });
+          }
+        }
+      },
+    });
+
+    menuItems.push({
+      label: "アラートを設定",
+      onClick: () => {
+        if (contextMenu.itemIndex !== undefined) {
+          const group = groups.find((g) => g.id === contextMenu.groupId);
+          if (group && group.items[contextMenu.itemIndex]) {
+            const item = group.items[contextMenu.itemIndex];
+            setAlertEditTarget({
+              symbol: item.symbol,
+              displayName: item.displayName || displayNames[item.symbol] || item.name || item.symbol,
+            });
+          }
+        }
+      },
+    });
+
+    menuItems.push({
+      label: "メモを編集",
+      onClick: () => {
+        if (contextMenu.itemIndex !== undefined) {
+          const group = groups.find((g) => g.id === contextMenu.groupId);
+          if (group && group.items[contextMenu.itemIndex]) {
+            setMemoEditTarget({
+              groupId: contextMenu.groupId,
+              itemIndex: contextMenu.itemIndex,
+              item: group.items[contextMenu.itemIndex],
+            });
+          }
+        }
+      },
+    });
+
+    menuItems.push({
       label: "削除",
       separator: true,
       onClick: () => {
@@ -1036,6 +1676,13 @@ function WatchlistSidebar({
           </div>
         )}
 
+        {/* Portfolio Summary */}
+        <PortfolioSummary
+          groups={groups}
+          currentPrices={currentPrices}
+          usdJpyRate={usdJpyRate}
+        />
+
         {/* Groups with DnD */}
         <div className="flex-1 overflow-y-auto">
           <DndContext
@@ -1061,8 +1708,10 @@ function WatchlistSidebar({
                       group={group}
                       isCollapsed={isCollapsed}
                       isEditingGroup={isEditingGrp}
+                      isActiveGroup={activeGroupId === group.id}
                       setEditingGroupId={setEditingGroupId}
                       onToggleGroup={onToggleGroup}
+                      onApplyGroup={onApplyGroup}
                       setAddingToGroupId={setAddingToGroupId}
                       onRenameGroup={onRenameGroup}
                       onContextMenu={handleGroupContextMenu}
@@ -1118,6 +1767,16 @@ function WatchlistSidebar({
           </DndContext>
         </div>
 
+        {/* Alert list */}
+        <AlertList alerts={alerts} onDelete={onDeleteAlert} />
+
+        {/* Memo list */}
+        <MemoList
+          groups={groups}
+          displayNames={displayNames}
+          onSelect={onSelect}
+        />
+
         {/* Quick add section */}
         <div className="shrink-0 border-t border-zinc-700 px-3 py-2">
           <div className="mb-1 text-[10px] font-medium text-zinc-500">
@@ -1157,6 +1816,47 @@ function WatchlistSidebar({
           onClose={() => setContextMenu(null)}
         />
       )}
+
+      {/* Holding edit modal */}
+      {holdingEditTarget && (
+        <HoldingModal
+          item={holdingEditTarget.item}
+          onSave={(holding) => {
+            onUpdateHolding(
+              holdingEditTarget.groupId,
+              holdingEditTarget.itemIndex,
+              holding
+            );
+          }}
+          onClose={() => setHoldingEditTarget(null)}
+        />
+      )}
+
+      {/* Alert edit modal */}
+      {alertEditTarget && (
+        <AlertModal
+          symbol={alertEditTarget.symbol}
+          displayName={alertEditTarget.displayName}
+          currentPrice={currentPrices[alertEditTarget.symbol] ?? null}
+          onSave={onAddAlert}
+          onClose={() => setAlertEditTarget(null)}
+        />
+      )}
+
+      {/* Memo edit modal */}
+      {memoEditTarget && (
+        <MemoModal
+          item={memoEditTarget.item}
+          onSave={(memo) => {
+            onUpdateMemo(
+              memoEditTarget.groupId,
+              memoEditTarget.itemIndex,
+              memo
+            );
+          }}
+          onClose={() => setMemoEditTarget(null)}
+        />
+      )}
     </>
   );
 }
@@ -1174,10 +1874,14 @@ export default function Home() {
   const [displayNames, setDisplayNames] = useState<Record<string, string>>({});
   const [focusedChart, setFocusedChart] = useState(0);
   const [fullscreenChart, setFullscreenChart] = useState<number | null>(null);
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [timeRangeIndex, setTimeRangeIndex] = useState(0); // default 1D
   const [refreshKey, setRefreshKey] = useState(0);
   const [lastUpdated, setLastUpdated] = useState("");
+  const [currentPrices, setCurrentPrices] = useState<Record<string, number>>({});
+  const [usdJpyRate, setUsdJpyRate] = useState<number | null>(null);
+  const [alerts, setAlerts] = useState<PriceAlert[]>([]);
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
     null
   );
@@ -1192,7 +1896,12 @@ export default function Home() {
       if (saved.collapsedGroups) setCollapsedGroups(saved.collapsedGroups);
       if (saved.displayNames) setDisplayNames(saved.displayNames);
     }
+    setAlerts(loadAlerts());
     setMounted(true);
+    // Request notification permission
+    if (typeof Notification !== "undefined" && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
   }, []);
 
   // On mount, resolve missing displayNames for watchlist items and chart symbols
@@ -1273,6 +1982,85 @@ export default function Home() {
     };
   }, [mounted]);
 
+  // Fetch USD/JPY rate via /api/quote
+  useEffect(() => {
+    if (!mounted) return;
+    const fetchRate = async () => {
+      try {
+        const res = await fetch(
+          `/api/quote?symbol=${encodeURIComponent("USDJPY=X")}`
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (data.price) {
+            setUsdJpyRate(data.price);
+          }
+        }
+      } catch {}
+    };
+    fetchRate();
+    // Refresh every 5 minutes
+    const interval = setInterval(fetchRate, 300000);
+    return () => clearInterval(interval);
+  }, [mounted]);
+
+  // Save alerts to localStorage
+  useEffect(() => {
+    if (!mounted) return;
+    saveAlerts(alerts);
+  }, [alerts, mounted]);
+
+  // Check price alerts on refresh
+  useEffect(() => {
+    if (!mounted || alerts.length === 0) return;
+    const triggered: string[] = [];
+
+    for (const alert of alerts) {
+      if (alert.triggered) continue;
+      const price = currentPrices[alert.symbol];
+      if (price == null) continue;
+
+      const shouldTrigger =
+        (alert.condition === "above" && price >= alert.targetPrice) ||
+        (alert.condition === "below" && price <= alert.targetPrice);
+
+      if (shouldTrigger) {
+        triggered.push(alert.id);
+        const condLabel = alert.condition === "above" ? "以上" : "以下";
+        if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+          new Notification("価格アラート", {
+            body: `${alert.displayName} が $${alert.targetPrice} ${condLabel}に達しました（現在値: $${price.toFixed(2)}）`,
+            icon: "/favicon.ico",
+          });
+        }
+      }
+    }
+
+    if (triggered.length > 0) {
+      setAlerts((prev) =>
+        prev.map((a) =>
+          triggered.includes(a.id) ? { ...a, triggered: true } : a
+        )
+      );
+    }
+  }, [refreshKey, currentPrices, alerts, mounted]);
+
+  const handleAddAlert = useCallback((alert: PriceAlert) => {
+    setAlerts((prev) => [...prev, alert]);
+  }, []);
+
+  const handleDeleteAlert = useCallback((id: string) => {
+    setAlerts((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  // Price update handler from chart components
+  const handlePriceUpdate = useCallback((symbol: string, price: number) => {
+    setCurrentPrices((prev) => {
+      if (prev[symbol] === price) return prev;
+      return { ...prev, [symbol]: price };
+    });
+  }, []);
+
   const layout = LAYOUTS[layoutIndex];
 
   const handleLayoutChange = useCallback((newIndex: number) => {
@@ -1288,6 +2076,7 @@ export default function Home() {
       return [...prev, ...extra];
     });
     setFocusedChart((prev) => (prev >= newLayout.count ? 0 : prev));
+    setActiveGroupId(null);
   }, []);
 
   const handleSymbolChange = useCallback(
@@ -1298,6 +2087,7 @@ export default function Home() {
         next[index] = normalized;
         return next;
       });
+      setActiveGroupId(null); // Manual change clears active group
       if (!displayNames[normalized]) {
         resolveDisplayName(normalized).then((name) => {
           setDisplayNames((prev) => ({ ...prev, [normalized]: name }));
@@ -1440,6 +2230,67 @@ export default function Home() {
     []
   );
 
+  const handleUpdateHolding = useCallback(
+    (groupId: string, itemIndex: number, holding: HoldingInfo | undefined) => {
+      setGroups((prev) =>
+        prev.map((g) => {
+          if (g.id !== groupId) return g;
+          const newItems = g.items.map((item, i) =>
+            i === itemIndex ? { ...item, holding } : item
+          );
+          return { ...g, items: newItems };
+        })
+      );
+    },
+    []
+  );
+
+  const handleUpdateMemo = useCallback(
+    (groupId: string, itemIndex: number, memo: string | undefined) => {
+      setGroups((prev) =>
+        prev.map((g) => {
+          if (g.id !== groupId) return g;
+          const newItems = g.items.map((item, i) =>
+            i === itemIndex ? { ...item, memo } : item
+          );
+          return { ...g, items: newItems };
+        })
+      );
+    },
+    []
+  );
+
+  // Apply group: fill dashboard with group's symbols, auto-adjust layout
+  const handleApplyGroup = useCallback(
+    (groupId: string) => {
+      const group = groups.find((g) => g.id === groupId);
+      if (!group || group.items.length === 0) return;
+
+      const groupSymbols = group.items.map((item) => item.symbol);
+
+      // Find the smallest layout that fits all items
+      const bestIdx = LAYOUTS.findIndex((l) => l.count >= groupSymbols.length);
+      const targetIdx = bestIdx !== -1 ? bestIdx : LAYOUTS.length - 1;
+      setLayoutIndex(targetIdx);
+
+      // Set symbols to exactly the group's symbols (no padding)
+      setSymbols(groupSymbols);
+
+      setActiveGroupId(groupId);
+      setFocusedChart(0);
+
+      // Resolve display names for any new symbols
+      for (const sym of groupSymbols) {
+        if (!displayNames[sym]) {
+          resolveDisplayName(sym).then((name) => {
+            setDisplayNames((prev) => ({ ...prev, [sym]: name }));
+          });
+        }
+      }
+    },
+    [groups, displayNames]
+  );
+
   // Close fullscreen on Escape
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -1518,17 +2369,26 @@ export default function Home() {
         <WatchlistSidebar
           groups={groups}
           collapsedGroups={collapsedGroups}
+          activeGroupId={activeGroupId}
+          currentPrices={currentPrices}
+          usdJpyRate={usdJpyRate}
+          alerts={alerts}
           onSelect={handleWatchlistSelect}
           onAddToGroup={handleAddToGroup}
           onRemoveItem={handleRemoveItem}
           onUpdateDisplayName={handleUpdateDisplayName}
+          onUpdateHolding={handleUpdateHolding}
+          onUpdateMemo={handleUpdateMemo}
           onMoveItem={handleMoveItem}
           onReorderItem={handleReorderItem}
           onReorderGroups={handleReorderGroups}
           onToggleGroup={handleToggleGroup}
+          onApplyGroup={handleApplyGroup}
           onRenameGroup={handleRenameGroup}
           onDeleteGroup={handleDeleteGroup}
           onAddGroup={handleAddGroup}
+          onAddAlert={handleAddAlert}
+          onDeleteAlert={handleDeleteAlert}
           displayNames={displayNames}
           open={sidebarOpen}
           onToggle={() => setSidebarOpen((p) => !p)}
@@ -1543,24 +2403,40 @@ export default function Home() {
             gridTemplateRows: `repeat(${layout.rows}, 1fr)`,
           }}
         >
-          {visibleSymbols.map((symbol, i) => (
-            <div
-              key={`${i}-${symbol}`}
-              className="min-h-0 min-w-0 bg-[#131722]"
-              onDoubleClick={() => setFullscreenChart(i)}
-            >
-              <TradingViewChart
-                symbol={symbol}
-                displayName={displayNames[symbol] || ""}
-                index={i}
-                timeRange={TIME_RANGES[timeRangeIndex]}
-                refreshKey={refreshKey}
-                isFocused={i === focusedChart}
-                onFocus={() => setFocusedChart(i)}
-                onSymbolChange={(s) => handleSymbolChange(i, s)}
-              />
-            </div>
-          ))}
+          {visibleSymbols.map((symbol, i) => {
+            // Find holding info and memo for this symbol from groups
+            let holdingInfo: HoldingInfo | undefined;
+            let memoText: string | undefined;
+            for (const group of groups) {
+              const item = group.items.find((it) => it.symbol === symbol);
+              if (item?.holding) holdingInfo = item.holding;
+              if (item?.memo) memoText = item.memo;
+              if (holdingInfo || memoText) break;
+            }
+
+            return (
+              <div
+                key={`${i}-${symbol}`}
+                className="min-h-0 min-w-0 bg-[#131722]"
+                onDoubleClick={() => setFullscreenChart(i)}
+              >
+                <TradingViewChart
+                  symbol={symbol}
+                  displayName={displayNames[symbol] || ""}
+                  index={i}
+                  timeRange={TIME_RANGES[timeRangeIndex]}
+                  refreshKey={refreshKey}
+                  isFocused={i === focusedChart}
+                  onFocus={() => setFocusedChart(i)}
+                  onSymbolChange={(s) => handleSymbolChange(i, s)}
+                  onPriceUpdate={handlePriceUpdate}
+                  holding={holdingInfo}
+                  usdJpyRate={usdJpyRate ?? undefined}
+                  memo={memoText}
+                />
+              </div>
+            );
+          })}
         </main>
       </div>
 
@@ -1591,6 +2467,24 @@ export default function Home() {
               isFocused={true}
               onFocus={() => {}}
               onSymbolChange={(s) => handleSymbolChange(fullscreenChart, s)}
+              onPriceUpdate={handlePriceUpdate}
+              holding={(() => {
+                const sym = visibleSymbols[fullscreenChart];
+                for (const group of groups) {
+                  const item = group.items.find((it) => it.symbol === sym);
+                  if (item?.holding) return item.holding;
+                }
+                return undefined;
+              })()}
+              usdJpyRate={usdJpyRate ?? undefined}
+              memo={(() => {
+                const sym = visibleSymbols[fullscreenChart];
+                for (const group of groups) {
+                  const item = group.items.find((it) => it.symbol === sym);
+                  if (item?.memo) return item.memo;
+                }
+                return undefined;
+              })()}
             />
           </div>
         </div>
