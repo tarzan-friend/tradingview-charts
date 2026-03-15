@@ -465,15 +465,18 @@ function HoldingModal({
 function PortfolioSummary({
   groups,
   currentPrices,
+  currencyMap,
   usdJpyRate,
 }: {
   groups: WatchlistGroup[];
   currentPrices: Record<string, number>;
+  currencyMap: Record<string, string>;
   usdJpyRate: number | null;
 }) {
   let totalPlUsd = 0;
   let totalCostUsd = 0;
   let totalPlJpy = 0;
+  let totalCostJpy = 0;
   let hasHolding = false;
 
   for (const group of groups) {
@@ -481,14 +484,26 @@ function PortfolioSummary({
       if (!item.holding || item.holding.shares <= 0) continue;
       const price = currentPrices[item.symbol];
       if (!price) continue;
-      hasHolding = true;
-      const plUsd = (price - item.holding.avgCostUsd) * item.holding.shares;
-      totalPlUsd += plUsd;
-      totalCostUsd += item.holding.avgCostUsd * item.holding.shares;
+      const isJpyCurrency = currencyMap[item.symbol] === "JPY";
 
-      if (usdJpyRate && item.holding.avgCostJpy > 0) {
-        const currentJpy = price * usdJpyRate;
-        totalPlJpy += (currentJpy - item.holding.avgCostJpy) * item.holding.shares;
+      if (isJpyCurrency && item.holding.avgCostJpy > 0) {
+        // JPY建て株 → 為替換算不要
+        hasHolding = true;
+        const plJpy = (price - item.holding.avgCostJpy) * item.holding.shares;
+        totalPlJpy += plJpy;
+        totalCostJpy += item.holding.avgCostJpy * item.holding.shares;
+      } else if (!isJpyCurrency && item.holding.avgCostUsd > 0) {
+        // USD建て株
+        hasHolding = true;
+        const plUsd = (price - item.holding.avgCostUsd) * item.holding.shares;
+        totalPlUsd += plUsd;
+        totalCostUsd += item.holding.avgCostUsd * item.holding.shares;
+        // USD建て株のJPY換算損益
+        if (usdJpyRate && item.holding.avgCostJpy > 0) {
+          const currentJpy = price * usdJpyRate;
+          totalPlJpy += (currentJpy - item.holding.avgCostJpy) * item.holding.shares;
+          totalCostJpy += item.holding.avgCostJpy * item.holding.shares;
+        }
       }
     }
   }
@@ -520,10 +535,15 @@ function PortfolioSummary({
       <div className="flex flex-wrap items-center gap-x-1 text-[11px] font-semibold" style={{ color }}>
         <span>{formatVal(totalPlUsd, "$")}</span>
         <span className="text-[10px] font-normal">({totalPct >= 0 ? "+" : ""}{totalPct.toFixed(1)}%)</span>
-        {usdJpyRate && totalPlJpy !== 0 && (
+        {totalPlJpy !== 0 && (
           <>
             <span className="text-zinc-600">|</span>
             <span>{formatVal(totalPlJpy, "¥")}</span>
+            {totalCostJpy > 0 && (
+              <span className="text-[10px] font-normal">
+                ({(totalPlJpy / totalCostJpy * 100) >= 0 ? "+" : ""}{(totalPlJpy / totalCostJpy * 100).toFixed(1)}%)
+              </span>
+            )}
           </>
         )}
       </div>
@@ -843,6 +863,9 @@ function SortableWatchlistItem({
   onRemoveItem,
   onContextMenu,
   isDragOverlay,
+  currentPrice,
+  usdJpyRate,
+  currency,
 }: {
   item: WatchlistItem;
   itemId: string;
@@ -855,6 +878,9 @@ function SortableWatchlistItem({
   onRemoveItem: (groupId: string, itemIndex: number) => void;
   onContextMenu: (e: React.MouseEvent, groupId: string, itemIndex: number) => void;
   isDragOverlay?: boolean;
+  currentPrice?: number | null;
+  usdJpyRate?: number | null;
+  currency?: string;
 }) {
   const itemIndex = parseInt(itemId.split(":")[1], 10);
   const {
@@ -943,9 +969,35 @@ function SortableWatchlistItem({
                 <span className="shrink-0 text-[10px]" title={item.memo}>📝</span>
               )}
             </div>
-            {label !== item.symbol && (
-              <div className="truncate text-[10px] text-zinc-500">
-                {item.symbol}
+            {(label !== item.symbol || (item.holding && item.holding.shares > 0)) && (
+              <div className="flex items-center gap-1 truncate text-[10px] text-zinc-500">
+                {label !== item.symbol && <span>{item.symbol}</span>}
+                {item.holding && item.holding.shares > 0 && currentPrice != null && (() => {
+                  const isJpyCurrency = currency === "JPY";
+                  let pl: number, pct: number, prefix: string;
+                  if (isJpyCurrency && item.holding!.avgCostJpy > 0) {
+                    pl = (currentPrice - item.holding!.avgCostJpy) * item.holding!.shares;
+                    pct = ((currentPrice - item.holding!.avgCostJpy) / item.holding!.avgCostJpy) * 100;
+                    prefix = "¥";
+                  } else if (!isJpyCurrency && item.holding!.avgCostUsd > 0) {
+                    pl = (currentPrice - item.holding!.avgCostUsd) * item.holding!.shares;
+                    pct = ((currentPrice - item.holding!.avgCostUsd) / item.holding!.avgCostUsd) * 100;
+                    prefix = "$";
+                  } else {
+                    return null;
+                  }
+                  const isPos = pl >= 0;
+                  const color = isPos ? "#00C805" : "#FF3B30";
+                  const sign = isPos ? "+" : "-";
+                  const formatted = prefix === "¥"
+                    ? `${sign}${prefix}${Math.round(Math.abs(pl)).toLocaleString("ja-JP")}`
+                    : `${sign}${prefix}${Math.abs(pl).toFixed(2)}`;
+                  return (
+                    <span style={{ color, fontSize: "11px" }}>
+                      {formatted} ({isPos ? "+" : ""}{pct.toFixed(1)}%)
+                    </span>
+                  );
+                })()}
               </div>
             )}
           </>
@@ -1113,6 +1165,7 @@ function WatchlistSidebar({
   collapsedGroups,
   activeGroupId,
   currentPrices,
+  currencyMap,
   usdJpyRate,
   alerts,
   onSelect,
@@ -1139,6 +1192,7 @@ function WatchlistSidebar({
   collapsedGroups: string[];
   activeGroupId: string | null;
   currentPrices: Record<string, number>;
+  currencyMap: Record<string, string>;
   usdJpyRate: number | null;
   alerts: PriceAlert[];
   onSelect: (symbol: string) => void;
@@ -1680,6 +1734,7 @@ function WatchlistSidebar({
         <PortfolioSummary
           groups={groups}
           currentPrices={currentPrices}
+          currencyMap={currencyMap}
           usdJpyRate={usdJpyRate}
         />
 
@@ -1732,6 +1787,9 @@ function WatchlistSidebar({
                             onUpdateDisplayName={onUpdateDisplayName}
                             onRemoveItem={onRemoveItem}
                             onContextMenu={handleItemContextMenu}
+                            currentPrice={currentPrices[item.symbol] ?? null}
+                            usdJpyRate={usdJpyRate}
+                            currency={currencyMap[item.symbol]}
                           />
                         ))}
                         {group.items.length === 0 && (
@@ -1880,6 +1938,7 @@ export default function Home() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [lastUpdated, setLastUpdated] = useState("");
   const [currentPrices, setCurrentPrices] = useState<Record<string, number>>({});
+  const [currencyMap, setCurrencyMap] = useState<Record<string, string>>({});
   const [usdJpyRate, setUsdJpyRate] = useState<number | null>(null);
   const [alerts, setAlerts] = useState<PriceAlert[]>([]);
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
@@ -2054,10 +2113,14 @@ export default function Home() {
   }, []);
 
   // Price update handler from chart components
-  const handlePriceUpdate = useCallback((symbol: string, price: number) => {
+  const handlePriceUpdate = useCallback((symbol: string, price: number, currency: string) => {
     setCurrentPrices((prev) => {
       if (prev[symbol] === price) return prev;
       return { ...prev, [symbol]: price };
+    });
+    setCurrencyMap((prev) => {
+      if (prev[symbol] === currency) return prev;
+      return { ...prev, [symbol]: currency };
     });
   }, []);
 
@@ -2371,6 +2434,7 @@ export default function Home() {
           collapsedGroups={collapsedGroups}
           activeGroupId={activeGroupId}
           currentPrices={currentPrices}
+          currencyMap={currencyMap}
           usdJpyRate={usdJpyRate}
           alerts={alerts}
           onSelect={handleWatchlistSelect}

@@ -46,6 +46,7 @@ export async function GET(request: NextRequest) {
 
     const prevClose = meta.chartPreviousClose ?? meta.previousClose ?? null;
     const currentPrice = meta.regularMarketPrice ?? null;
+    const currency: string = meta.currency ?? "USD";
 
     let changePercent: number | null = null;
     if (prevClose && currentPrice) {
@@ -53,7 +54,7 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json(
-      { chartData, prevClose, currentPrice, changePercent },
+      { chartData, prevClose, currentPrice, changePercent, currency },
       {
         headers: {
           "Cache-Control": "public, s-maxage=30, stale-while-revalidate=60",

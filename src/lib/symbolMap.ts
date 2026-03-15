@@ -37,5 +37,14 @@ export function toYahooSymbol(symbol: string): string {
 
   // Strip exchange prefix
   const parts = trimmed.split(":");
-  return parts.length > 1 ? parts[1] : parts[0];
+  if (parts.length > 1) {
+    const exchange = parts[0].toUpperCase();
+    const ticker = parts[1];
+    // TSE (Tokyo Stock Exchange) → append .T for Yahoo Finance
+    if (exchange === "TSE" || exchange === "TYO") {
+      return `${ticker}.T`;
+    }
+    return ticker;
+  }
+  return parts[0];
 }

@@ -38,7 +38,7 @@ interface TradingViewChartProps {
   isFocused: boolean;
   onFocus: () => void;
   onSymbolChange: (symbol: string) => void;
-  onPriceUpdate?: (symbol: string, price: number) => void;
+  onPriceUpdate?: (symbol: string, price: number, currency: string) => void;
   holding?: HoldingInfo;
   usdJpyRate?: number;
   memo?: string;
@@ -93,32 +93,59 @@ function HoldingBadge({
   holding,
   currentPrice,
   usdJpyRate,
+  currency,
 }: {
   holding: HoldingInfo;
   currentPrice: number | null;
   usdJpyRate?: number;
+  currency: string;
 }) {
   if (!currentPrice || holding.shares <= 0) return null;
 
-  const plUsd = (currentPrice - holding.avgCostUsd) * holding.shares;
-  const plPct = ((currentPrice - holding.avgCostUsd) / holding.avgCostUsd) * 100;
-  const isPositive = plUsd >= 0;
-  const color = isPositive ? "#00C805" : "#FF3B30";
+  const isJpyCurrency = currency === "JPY";
 
-  let plJpyStr = "";
-  if (usdJpyRate && holding.avgCostJpy > 0) {
-    const currentJpy = currentPrice * usdJpyRate;
-    const plJpy = (currentJpy - holding.avgCostJpy) * holding.shares;
-    plJpyStr = ` | ${formatCurrency(plJpy, "¥")}`;
+  // JPY建て株 + avgCostJpy あり → 為替換算不要
+  if (isJpyCurrency && holding.avgCostJpy > 0) {
+    const plJpy = (currentPrice - holding.avgCostJpy) * holding.shares;
+    const pct = ((currentPrice - holding.avgCostJpy) / holding.avgCostJpy) * 100;
+    const isPositive = plJpy >= 0;
+    const color = isPositive ? "#00C805" : "#FF3B30";
+    const plStr = formatCurrency(plJpy, "¥");
+    return (
+      <span className="ml-1 truncate text-[9px] font-medium" style={{ color }}
+        title={`${holding.shares}株 | ${plStr} (${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)`}
+      >
+        {holding.shares}株 | {plStr} ({pct >= 0 ? "+" : ""}{pct.toFixed(1)}%)
+      </span>
+    );
   }
 
+  // USD建て株 + avgCostUsd あり
+  if (!isJpyCurrency && holding.avgCostUsd > 0) {
+    const plUsd = (currentPrice - holding.avgCostUsd) * holding.shares;
+    const pct = ((currentPrice - holding.avgCostUsd) / holding.avgCostUsd) * 100;
+    const isPositive = plUsd >= 0;
+    const color = isPositive ? "#00C805" : "#FF3B30";
+    const plStr = formatCurrency(plUsd, "$");
+    let plJpyStr = "";
+    if (usdJpyRate && holding.avgCostJpy > 0) {
+      const currentJpy = currentPrice * usdJpyRate;
+      const plJpy = (currentJpy - holding.avgCostJpy) * holding.shares;
+      plJpyStr = ` | ${formatCurrency(plJpy, "¥")}`;
+    }
+    return (
+      <span className="ml-1 truncate text-[9px] font-medium" style={{ color }}
+        title={`${holding.shares}株 | ${plStr} (${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)${plJpyStr}`}
+      >
+        {holding.shares}株 | {plStr} ({pct >= 0 ? "+" : ""}{pct.toFixed(1)}%){plJpyStr}
+      </span>
+    );
+  }
+
+  // コスト情報なし → 株数のみ
   return (
-    <span
-      className="ml-1 truncate text-[9px] font-medium"
-      style={{ color }}
-      title={`${holding.shares}株 | ${formatCurrency(plUsd, "$")} (${plPct >= 0 ? "+" : ""}${plPct.toFixed(1)}%)${plJpyStr}`}
-    >
-      {holding.shares}株 | {formatCurrency(plUsd, "$")} ({plPct >= 0 ? "+" : ""}{plPct.toFixed(1)}%){plJpyStr}
+    <span className="ml-1 truncate text-[9px] font-medium text-zinc-400">
+      {holding.shares}株
     </span>
   );
 }
@@ -147,6 +174,7 @@ export default function TradingViewChart({
   const [input, setInput] = useState(symbol);
   const [changePercent, setChangePercent] = useState<number | null>(null);
   const [currentPrice, setCurrentPrice] = useState<number | null>(null);
+  const [priceCurrency, setPriceCurrency] = useState<string>("USD");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showMemo, setShowMemo] = useState(false);
@@ -166,13 +194,15 @@ export default function TradingViewChart({
       const chartData: ChartDataPoint[] = data.chartData || [];
       const prevClose: number | null = data.prevClose ?? null;
       const price: number | null = data.currentPrice ?? null;
+      const currency: string = data.currency ?? "USD";
 
       setChangePercent(data.changePercent ?? null);
       setCurrentPrice(price);
+      setPriceCurrency(currency);
 
       // Notify parent of price update
       if (price !== null && onPriceUpdate) {
-        onPriceUpdate(symbol, price);
+        onPriceUpdate(symbol, price, currency);
       }
 
       if (seriesRef.current && chartRef.current) {
@@ -361,6 +391,7 @@ export default function TradingViewChart({
                 holding={holding}
                 currentPrice={currentPrice}
                 usdJpyRate={usdJpyRate}
+                currency={priceCurrency}
               />
             )}
             {memo && (
