@@ -35,6 +35,13 @@ export function toYahooSymbol(symbol: string): string {
   if (SYMBOL_MAP[upper]) return SYMBOL_MAP[upper];
   if (SYMBOL_MAP[trimmed]) return SYMBOL_MAP[trimmed];
 
+  // Check if Japanese stock code (e.g. 7203, 485A, 175A, 2267A)
+  const isJapaneseStock = (input: string) => {
+    if (/^\d{4,5}$/.test(input)) return true;
+    if (/^\d{3,4}[A-Za-z]$/.test(input)) return true;
+    return false;
+  };
+
   // Strip exchange prefix
   const parts = trimmed.split(":");
   if (parts.length > 1) {
@@ -42,9 +49,15 @@ export function toYahooSymbol(symbol: string): string {
     const ticker = parts[1];
     // TSE (Tokyo Stock Exchange) → append .T for Yahoo Finance
     if (exchange === "TSE" || exchange === "TYO") {
-      return `${ticker}.T`;
+      return `${ticker.toUpperCase()}.T`;
     }
     return ticker;
   }
+
+  // Auto-detect Japanese stock codes without exchange prefix
+  if (isJapaneseStock(parts[0])) {
+    return `${parts[0].toUpperCase()}.T`;
+  }
+
   return parts[0];
 }
