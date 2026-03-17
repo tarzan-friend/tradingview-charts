@@ -1603,23 +1603,31 @@ function WatchlistSidebar({
 
   const activeItemData = getActiveItem();
 
+  // Detect if we're in mobile full-screen mode (no toggle, always open, full width)
+  const isMobileFullScreen = typeof window !== "undefined" && window.innerWidth < 768;
+  // Tablet: narrower sidebar
+  const isTabletView = typeof window !== "undefined" && window.innerWidth >= 768 && window.innerWidth < 1024;
+  const sidebarWidth = isMobileFullScreen ? "100%" : isTabletView ? "160px" : "240px";
+
   return (
     <>
-      {/* Toggle button */}
-      <button
-        onClick={onToggle}
-        className="absolute left-0 top-1/2 z-20 -translate-y-1/2 rounded-r bg-[#2a2e39] px-1 py-3 text-zinc-400 hover:bg-[#363a45] hover:text-white"
-        style={{ left: open ? "240px" : "0px", transition: "left 0.2s" }}
-        title={open ? "サイドバーを閉じる" : "ウォッチリスト"}
-      >
-        {open ? "◀" : "▶"}
-      </button>
+      {/* Toggle button - hidden on mobile */}
+      {!isMobileFullScreen && (
+        <button
+          onClick={onToggle}
+          className="absolute left-0 top-1/2 z-20 -translate-y-1/2 rounded-r bg-[#2a2e39] px-1 py-3 text-zinc-400 hover:bg-[#363a45] hover:text-white"
+          style={{ left: open ? sidebarWidth : "0px", transition: "left 0.2s" }}
+          title={open ? "サイドバーを閉じる" : "ウォッチリスト"}
+        >
+          {open ? "◀" : "▶"}
+        </button>
+      )}
 
       {/* Sidebar */}
       <aside
-        className="z-10 flex shrink-0 flex-col border-r border-zinc-700 bg-[#1e222d]"
-        style={{
-          width: open ? "240px" : "0px",
+        className={`z-10 flex shrink-0 flex-col border-r border-zinc-700 bg-[#1e222d] ${isMobileFullScreen ? "w-full flex-1" : ""}`}
+        style={isMobileFullScreen ? {} : {
+          width: open ? sidebarWidth : "0px",
           overflow: "hidden",
           transition: "width 0.2s",
         }}
@@ -1932,6 +1940,27 @@ function WatchlistSidebar({
 
 // --- Main Page ---
 
+// --- Mobile Tab type ---
+type MobileTab = "charts" | "watchlist" | "portfolio";
+
+// --- useIsMobile hook ---
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(false);
+  const [isTablet, setIsTablet] = useState(false);
+
+  useEffect(() => {
+    const check = () => {
+      setIsMobile(window.innerWidth < 768);
+      setIsTablet(window.innerWidth >= 768 && window.innerWidth < 1024);
+    };
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, []);
+
+  return { isMobile, isTablet };
+}
+
 export default function Home() {
   const [mounted, setMounted] = useState(false);
   const [symbols, setSymbols] = useState<string[]>(
@@ -1952,6 +1981,8 @@ export default function Home() {
   const [currencyMap, setCurrencyMap] = useState<Record<string, string>>({});
   const [usdJpyRate, setUsdJpyRate] = useState<number | null>(null);
   const [alerts, setAlerts] = useState<PriceAlert[]>([]);
+  const [mobileTab, setMobileTab] = useState<MobileTab>("charts");
+  const { isMobile, isTablet } = useIsMobile();
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
     null
   );
@@ -2135,7 +2166,11 @@ export default function Home() {
     });
   }, []);
 
-  const layout = LAYOUTS[layoutIndex];
+  // On tablet, clamp layout to max 4 charts
+  const effectiveLayoutIndex = isTablet
+    ? Math.min(layoutIndex, 2) // index 2 = 4 charts
+    : layoutIndex;
+  const layout = LAYOUTS[effectiveLayoutIndex];
 
   const handleLayoutChange = useCallback((newIndex: number) => {
     const newLayout = LAYOUTS[newIndex];
@@ -2387,33 +2422,41 @@ export default function Home() {
 
   const visibleSymbols = symbols.slice(0, layout.count);
 
+  // Mobile chart grid: 1 col for 1 chart, 2 cols otherwise
+  const mobileChartCols = visibleSymbols.length <= 1 ? 1 : 2;
+  const mobileChartRows = Math.ceil(visibleSymbols.length / mobileChartCols);
+
   return (
-    <div className="flex h-screen flex-col bg-[#131722]">
+    <div className={`flex flex-col bg-[#131722] ${isMobile ? "min-h-screen pb-14" : "h-screen"}`}>
       {/* Header */}
-      <header className="flex h-9 shrink-0 items-center gap-3 border-b border-zinc-700 px-3">
-        <h1 className="text-xs font-semibold text-zinc-400">Multi Charts</h1>
-        <div className="h-4 w-px bg-zinc-700" />
-        {/* Layout buttons */}
-        <div className="flex items-center gap-1">
-          <span className="mr-1 text-[10px] text-zinc-500">レイアウト:</span>
-          {LAYOUTS.map((l, i) => (
-            <button
-              key={l.count}
-              onClick={() => handleLayoutChange(i)}
-              className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                i === layoutIndex
-                  ? "bg-blue-600 text-white"
-                  : "bg-[#2a2e39] text-zinc-400 hover:bg-[#363a45] hover:text-zinc-200"
-              }`}
-            >
-              {l.label}
-            </button>
-          ))}
-        </div>
+      <header className="flex h-9 shrink-0 items-center gap-2 border-b border-zinc-700 px-2 md:gap-3 md:px-3">
+        <h1 className="text-xs font-semibold text-zinc-400 md:block">Multi Charts</h1>
+        {/* Layout buttons - hidden on mobile */}
+        {!isMobile && (
+          <>
+            <div className="h-4 w-px bg-zinc-700" />
+            <div className="flex items-center gap-1">
+              <span className="mr-1 text-[10px] text-zinc-500">レイアウト:</span>
+              {LAYOUTS.map((l, i) => (
+                <button
+                  key={l.count}
+                  onClick={() => handleLayoutChange(i)}
+                  className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                    i === layoutIndex
+                      ? "bg-blue-600 text-white"
+                      : "bg-[#2a2e39] text-zinc-400 hover:bg-[#363a45] hover:text-zinc-200"
+                  }`}
+                >
+                  {l.label}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
         <div className="h-4 w-px bg-zinc-700" />
         {/* Time range buttons */}
         <div className="flex items-center gap-1">
-          <span className="mr-1 text-[10px] text-zinc-500">期間:</span>
+          {!isMobile && <span className="mr-1 text-[10px] text-zinc-500">期間:</span>}
           {TIME_RANGES.map((tr, i) => (
             <button
               key={tr.label}
@@ -2428,8 +2471,8 @@ export default function Home() {
             </button>
           ))}
         </div>
-        {/* Last updated */}
-        {lastUpdated && (
+        {/* Last updated - hidden on mobile */}
+        {lastUpdated && !isMobile && (
           <div className="ml-auto flex items-center gap-1 text-[10px] text-zinc-500">
             <span>最終更新: {lastUpdated}</span>
             <span>⟳</span>
@@ -2438,82 +2481,273 @@ export default function Home() {
       </header>
 
       {/* Body */}
-      <div className="relative flex min-h-0 flex-1">
-        {/* Watchlist Sidebar */}
-        <WatchlistSidebar
-          groups={groups}
-          collapsedGroups={collapsedGroups}
-          activeGroupId={activeGroupId}
-          currentPrices={currentPrices}
-          currencyMap={currencyMap}
-          usdJpyRate={usdJpyRate}
-          alerts={alerts}
-          onSelect={handleWatchlistSelect}
-          onAddToGroup={handleAddToGroup}
-          onRemoveItem={handleRemoveItem}
-          onUpdateDisplayName={handleUpdateDisplayName}
-          onUpdateHolding={handleUpdateHolding}
-          onUpdateMemo={handleUpdateMemo}
-          onMoveItem={handleMoveItem}
-          onReorderItem={handleReorderItem}
-          onReorderGroups={handleReorderGroups}
-          onToggleGroup={handleToggleGroup}
-          onApplyGroup={handleApplyGroup}
-          onRenameGroup={handleRenameGroup}
-          onDeleteGroup={handleDeleteGroup}
-          onAddGroup={handleAddGroup}
-          onAddAlert={handleAddAlert}
-          onDeleteAlert={handleDeleteAlert}
-          displayNames={displayNames}
-          open={sidebarOpen}
-          onToggle={() => setSidebarOpen((p) => !p)}
-        />
+      <div className={`relative flex min-h-0 flex-1 ${isMobile ? "flex-col" : ""}`}>
+        {/* Watchlist Sidebar - hidden on mobile (shown via tab), narrower on tablet */}
+        {!isMobile && (
+          <WatchlistSidebar
+            groups={groups}
+            collapsedGroups={collapsedGroups}
+            activeGroupId={activeGroupId}
+            currentPrices={currentPrices}
+            currencyMap={currencyMap}
+            usdJpyRate={usdJpyRate}
+            alerts={alerts}
+            onSelect={handleWatchlistSelect}
+            onAddToGroup={handleAddToGroup}
+            onRemoveItem={handleRemoveItem}
+            onUpdateDisplayName={handleUpdateDisplayName}
+            onUpdateHolding={handleUpdateHolding}
+            onUpdateMemo={handleUpdateMemo}
+            onMoveItem={handleMoveItem}
+            onReorderItem={handleReorderItem}
+            onReorderGroups={handleReorderGroups}
+            onToggleGroup={handleToggleGroup}
+            onApplyGroup={handleApplyGroup}
+            onRenameGroup={handleRenameGroup}
+            onDeleteGroup={handleDeleteGroup}
+            onAddGroup={handleAddGroup}
+            onAddAlert={handleAddAlert}
+            onDeleteAlert={handleDeleteAlert}
+            displayNames={displayNames}
+            open={sidebarOpen}
+            onToggle={() => setSidebarOpen((p) => !p)}
+          />
+        )}
 
-        {/* Charts Grid */}
-        <main
-          className="min-h-0 min-w-0 flex-1 gap-px bg-zinc-800"
-          style={{
-            display: "grid",
-            gridTemplateColumns: `repeat(${layout.cols}, 1fr)`,
-            gridTemplateRows: `repeat(${layout.rows}, 1fr)`,
-          }}
-        >
-          {visibleSymbols.map((symbol, i) => {
-            // Find holding info and memo for this symbol from groups
-            let holdingInfo: HoldingInfo | undefined;
-            let memoText: string | undefined;
-            for (const group of groups) {
-              const item = group.items.find((it) => it.symbol === symbol);
-              if (item?.holding) holdingInfo = item.holding;
-              if (item?.memo) memoText = item.memo;
-              if (holdingInfo || memoText) break;
-            }
-
-            return (
-              <div
-                key={`${i}-${symbol}`}
-                className="min-h-0 min-w-0 bg-[#131722]"
-                onDoubleClick={() => setFullscreenChart(i)}
+        {/* Mobile: Tab content */}
+        {isMobile ? (
+          <>
+            {/* Charts tab */}
+            {mobileTab === "charts" && (
+              <main
+                className="w-full gap-px bg-zinc-800"
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: `repeat(${mobileChartCols}, 1fr)`,
+                  gridAutoRows: "240px",
+                }}
               >
-                <TradingViewChart
-                  symbol={symbol}
-                  displayName={displayNames[symbol] || ""}
-                  index={i}
-                  timeRange={TIME_RANGES[timeRangeIndex]}
-                  refreshKey={refreshKey}
-                  isFocused={i === focusedChart}
-                  onFocus={() => setFocusedChart(i)}
-                  onSymbolChange={(s) => handleSymbolChange(i, s)}
-                  onPriceUpdate={handlePriceUpdate}
-                  holding={holdingInfo}
-                  usdJpyRate={usdJpyRate ?? undefined}
-                  memo={memoText}
+                {visibleSymbols.map((symbol, i) => {
+                  let holdingInfo: HoldingInfo | undefined;
+                  let memoText: string | undefined;
+                  for (const group of groups) {
+                    const item = group.items.find((it) => it.symbol === symbol);
+                    if (item?.holding) holdingInfo = item.holding;
+                    if (item?.memo) memoText = item.memo;
+                    if (holdingInfo || memoText) break;
+                  }
+                  return (
+                    <div key={`${i}-${symbol}`} className="min-w-0 bg-[#131722]">
+                      <TradingViewChart
+                        symbol={symbol}
+                        displayName={displayNames[symbol] || ""}
+                        index={i}
+                        timeRange={TIME_RANGES[timeRangeIndex]}
+                        refreshKey={refreshKey}
+                        isFocused={i === focusedChart}
+                        onFocus={() => setFocusedChart(i)}
+                        onSymbolChange={(s) => handleSymbolChange(i, s)}
+                        onPriceUpdate={handlePriceUpdate}
+                        holding={holdingInfo}
+                        usdJpyRate={usdJpyRate ?? undefined}
+                        memo={memoText}
+                      />
+                    </div>
+                  );
+                })}
+              </main>
+            )}
+
+            {/* Watchlist tab (mobile full-screen) */}
+            {mobileTab === "watchlist" && (
+              <div className="flex flex-1 flex-col">
+                <WatchlistSidebar
+                  groups={groups}
+                  collapsedGroups={collapsedGroups}
+                  activeGroupId={activeGroupId}
+                  currentPrices={currentPrices}
+                  currencyMap={currencyMap}
+                  usdJpyRate={usdJpyRate}
+                  alerts={alerts}
+                  onSelect={(symbol) => {
+                    handleWatchlistSelect(symbol);
+                    setMobileTab("charts");
+                  }}
+                  onAddToGroup={handleAddToGroup}
+                  onRemoveItem={handleRemoveItem}
+                  onUpdateDisplayName={handleUpdateDisplayName}
+                  onUpdateHolding={handleUpdateHolding}
+                  onUpdateMemo={handleUpdateMemo}
+                  onMoveItem={handleMoveItem}
+                  onReorderItem={handleReorderItem}
+                  onReorderGroups={handleReorderGroups}
+                  onToggleGroup={handleToggleGroup}
+                  onApplyGroup={(groupId) => {
+                    handleApplyGroup(groupId);
+                    setMobileTab("charts");
+                  }}
+                  onRenameGroup={handleRenameGroup}
+                  onDeleteGroup={handleDeleteGroup}
+                  onAddGroup={handleAddGroup}
+                  onAddAlert={handleAddAlert}
+                  onDeleteAlert={handleDeleteAlert}
+                  displayNames={displayNames}
+                  open={true}
+                  onToggle={() => {}}
                 />
               </div>
-            );
-          })}
-        </main>
+            )}
+
+            {/* Portfolio tab (mobile full-screen) */}
+            {mobileTab === "portfolio" && (
+              <div className="flex-1 overflow-y-auto p-3">
+                <h2 className="mb-3 text-sm font-semibold text-zinc-300">ポートフォリオ</h2>
+                <PortfolioSummary
+                  groups={groups}
+                  currentPrices={currentPrices}
+                  currencyMap={currencyMap}
+                  usdJpyRate={usdJpyRate}
+                  activeGroupId={activeGroupId}
+                />
+                {/* Per-group summaries on mobile */}
+                {groups.map((group) => {
+                  const hasHoldings = group.items.some(
+                    (item) => item.holding && item.holding.shares > 0 && currentPrices[item.symbol]
+                  );
+                  if (!hasHoldings) return null;
+                  return (
+                    <div key={group.id} className="mt-3">
+                      <div className="mb-1 text-[10px] font-medium text-zinc-500">{group.name}</div>
+                      {group.items.map((item) => {
+                        if (!item.holding || item.holding.shares <= 0) return null;
+                        const price = currentPrices[item.symbol];
+                        if (!price) return null;
+                        const isJpyCurrency = currencyMap[item.symbol] === "JPY";
+                        let pl: number, pct: number, prefix: string;
+                        if (isJpyCurrency && item.holding.avgCostJpy > 0) {
+                          pl = (price - item.holding.avgCostJpy) * item.holding.shares;
+                          pct = ((price - item.holding.avgCostJpy) / item.holding.avgCostJpy) * 100;
+                          prefix = "¥";
+                        } else if (!isJpyCurrency && item.holding.avgCostUsd > 0) {
+                          pl = (price - item.holding.avgCostUsd) * item.holding.shares;
+                          pct = ((price - item.holding.avgCostUsd) / item.holding.avgCostUsd) * 100;
+                          prefix = "$";
+                        } else {
+                          return null;
+                        }
+                        const isPos = pl >= 0;
+                        const color = isPos ? "#00C805" : "#FF3B30";
+                        const sign = isPos ? "+" : "-";
+                        const label = item.displayName || displayNames[item.symbol] || item.name || item.symbol;
+                        const formatted = prefix === "¥"
+                          ? `${sign}${prefix}${Math.round(Math.abs(pl)).toLocaleString("ja-JP")}`
+                          : `${sign}${prefix}${Math.abs(pl).toFixed(2)}`;
+                        return (
+                          <div
+                            key={item.symbol}
+                            className="flex items-center justify-between rounded px-2 py-1.5 text-xs"
+                            style={{ backgroundColor: isPos ? "#00C80508" : "#FF3B3008" }}
+                          >
+                            <div>
+                              <div className="text-zinc-300">{label}</div>
+                              <div className="text-[10px] text-zinc-500">
+                                {item.holding.shares}株 × {prefix === "¥" ? `¥${price.toLocaleString("ja-JP")}` : `$${price.toFixed(2)}`}
+                              </div>
+                            </div>
+                            <div className="text-right" style={{ color }}>
+                              <div className="text-xs font-semibold">{formatted}</div>
+                              <div className="text-[10px]">{isPos ? "+" : ""}{pct.toFixed(1)}%</div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        ) : (
+          /* Desktop / Tablet: Charts Grid */
+          <main
+            className="min-h-0 min-w-0 flex-1 gap-px bg-zinc-800"
+            style={{
+              display: "grid",
+              gridTemplateColumns: `repeat(${layout.cols}, 1fr)`,
+              gridTemplateRows: `repeat(${layout.rows}, 1fr)`,
+            }}
+          >
+            {visibleSymbols.map((symbol, i) => {
+              let holdingInfo: HoldingInfo | undefined;
+              let memoText: string | undefined;
+              for (const group of groups) {
+                const item = group.items.find((it) => it.symbol === symbol);
+                if (item?.holding) holdingInfo = item.holding;
+                if (item?.memo) memoText = item.memo;
+                if (holdingInfo || memoText) break;
+              }
+              return (
+                <div
+                  key={`${i}-${symbol}`}
+                  className="min-h-0 min-w-0 bg-[#131722]"
+                  onDoubleClick={() => setFullscreenChart(i)}
+                >
+                  <TradingViewChart
+                    symbol={symbol}
+                    displayName={displayNames[symbol] || ""}
+                    index={i}
+                    timeRange={TIME_RANGES[timeRangeIndex]}
+                    refreshKey={refreshKey}
+                    isFocused={i === focusedChart}
+                    onFocus={() => setFocusedChart(i)}
+                    onSymbolChange={(s) => handleSymbolChange(i, s)}
+                    onPriceUpdate={handlePriceUpdate}
+                    holding={holdingInfo}
+                    usdJpyRate={usdJpyRate ?? undefined}
+                    memo={memoText}
+                  />
+                </div>
+              );
+            })}
+          </main>
+        )}
       </div>
+
+      {/* Mobile Bottom Tab Bar */}
+      {isMobile && (
+        <div
+          className="fixed bottom-0 left-0 right-0 z-50 flex items-center justify-around border-t border-zinc-700"
+          style={{ backgroundColor: "#1a1a2e", height: "56px" }}
+        >
+          <button
+            onClick={() => setMobileTab("charts")}
+            className={`flex flex-1 flex-col items-center justify-center gap-0.5 py-1 ${
+              mobileTab === "charts" ? "text-blue-400" : "text-zinc-500"
+            }`}
+          >
+            <span className="text-lg">📊</span>
+            <span className="text-[10px]">チャート</span>
+          </button>
+          <button
+            onClick={() => setMobileTab("watchlist")}
+            className={`flex flex-1 flex-col items-center justify-center gap-0.5 py-1 ${
+              mobileTab === "watchlist" ? "text-blue-400" : "text-zinc-500"
+            }`}
+          >
+            <span className="text-lg">📋</span>
+            <span className="text-[10px]">リスト</span>
+          </button>
+          <button
+            onClick={() => setMobileTab("portfolio")}
+            className={`flex flex-1 flex-col items-center justify-center gap-0.5 py-1 ${
+              mobileTab === "portfolio" ? "text-blue-400" : "text-zinc-500"
+            }`}
+          >
+            <span className="text-lg">💰</span>
+            <span className="text-[10px]">損益</span>
+          </button>
+        </div>
+      )}
 
       {/* Fullscreen chart modal */}
       {fullscreenChart !== null && visibleSymbols[fullscreenChart] && (

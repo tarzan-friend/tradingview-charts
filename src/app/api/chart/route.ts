@@ -37,9 +37,11 @@ export async function GET(request: NextRequest) {
     const quotes = result.indicators?.quote?.[0] || {};
     const meta = result.meta || {};
 
+    // Convert UTC timestamps to JST (UTC+9) for lightweight-charts display
+    const JST_OFFSET = 9 * 60 * 60; // +9 hours in seconds
     const chartData = timestamps
       .map((t: number, i: number) => ({
-        time: t,
+        time: t + JST_OFFSET,
         value: quotes.close?.[i] ?? null,
       }))
       .filter((d: { time: number; value: number | null }) => d.value !== null);

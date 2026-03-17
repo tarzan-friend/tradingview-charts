@@ -18,6 +18,14 @@ body {
   color: var(--foreground);
 }
 
+/* On mobile, allow scrolling for chart grid */
+@media (max-width: 767px) {
+  body {
+    overflow: auto;
+    overflow-x: hidden;
+  }
+}
+
 /* Sidebar scrollbar */
 aside::-webkit-scrollbar {
   width: 4px;
