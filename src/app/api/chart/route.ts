@@ -89,7 +89,8 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const prevClose = meta.chartPreviousClose ?? meta.previousClose ?? null;
+    // previousCloseが前営業日の正確な終値（chartPreviousCloseはrange依存で不正確）
+    const prevClose = meta.previousClose ?? meta.chartPreviousClose ?? null;
     const currentPrice = meta.regularMarketPrice ?? null;
     const currency: string = meta.currency ?? "USD";
 
