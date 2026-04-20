@@ -1,113 +1,143 @@
-import { NextRequest, NextResponse } from "next/server";
 import { toYahooSymbol } from "@/lib/symbolMap";
 
-export async function GET(request: NextRequest) {
-  const symbol = request.nextUrl.searchParams.get("symbol");
-  const interval = request.nextUrl.searchParams.get("interval") || "5m";
-  const range = request.nextUrl.searchParams.get("range") || "1d";
+interface YahooResult {
+  meta: {
+    previousClose?: number;
+    chartPreviousClose?: number;
+    regularMarketPrice?: number;
+    regularMarketChangePercent?: number;
+    currency?: string;
+  };
+  timestamp?: number[];
+  indicators?: {
+    quote?: Array<{ close?: Array<number | null> }>;
+  };
+}
+
+// rangeとintervalのマッピング
+const rangeMap: Record<string, { interval: string; range: string }> = {
+  "1d": { interval: "5m", range: "1d" },
+  "5d": { interval: "30m", range: "5d" },
+  "1mo": { interval: "1d", range: "1mo" },
+  "3mo": { interval: "1d", range: "3mo" },
+  "1y": { interval: "1wk", range: "1y" },
+};
+
+async function fetchYahoo(
+  symbol: string,
+  interval: string,
+  range: string
+): Promise<YahooResult | null> {
+  const host1 = "https://query1.finance.yahoo.com";
+  const host2 = "https://query2.finance.yahoo.com";
+  const path = `/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false`;
+
+  for (const host of [host1, host2]) {
+    try {
+      const res = await fetch(`${host}${path}`, {
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+          Accept: "application/json",
+        },
+        cache: "no-store",
+      });
+      const data = await res.json();
+      const result = data?.chart?.result?.[0];
+      if (result) return result;
+    } catch {
+      // try next host
+    }
+  }
+  return null;
+}
+
+// 1Dの場合のフォールバック付きデータ取得
+async function fetchWithFallback(symbol: string): Promise<YahooResult | null> {
+  const attempts = [
+    { interval: "5m", range: "1d" },
+    { interval: "5m", range: "5d" },
+    { interval: "1d", range: "1mo" },
+  ];
+
+  let lastResult: YahooResult | null = null;
+  for (const attempt of attempts) {
+    const result = await fetchYahoo(symbol, attempt.interval, attempt.range);
+    if (result) {
+      lastResult = result;
+      if ((result.timestamp?.length ?? 0) >= 3) {
+        return result;
+      }
+    }
+  }
+  return lastResult;
+}
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const symbol = searchParams.get("symbol") || "";
+  const range = searchParams.get("range") || "1d";
 
   if (!symbol) {
-    return NextResponse.json({ error: "symbol required" }, { status: 400 });
+    return Response.json({ error: "symbol required" }, { status: 400 });
   }
 
   const ticker = toYahooSymbol(symbol);
 
-  // 1Dの場合は5d分取得して最新営業日のデータのみ抽出する
-  const fetchRange = range === "1d" ? "5d" : range;
-
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=${interval}&range=${fetchRange}`;
-    const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      signal: AbortSignal.timeout(8000),
-    });
+    let result: YahooResult | null;
 
-    if (!res.ok) {
-      return NextResponse.json(
-        { error: `Yahoo API returned ${res.status}` },
-        { status: res.status }
-      );
+    if (range === "1d") {
+      // 1Dはフォールバック付きで取得
+      result = await fetchWithFallback(ticker);
+    } else {
+      // それ以外は既存のrangeMapで取得
+      const params = rangeMap[range] || rangeMap["1d"];
+      result = await fetchYahoo(ticker, params.interval, params.range);
     }
-
-    const data = await res.json();
-    const result = data?.chart?.result?.[0];
 
     if (!result) {
-      return NextResponse.json({ error: "No data" }, { status: 404 });
-    }
-
-    const timestamps: number[] = result.timestamp || [];
-    const quotes = result.indicators?.quote?.[0] || {};
-    const meta = result.meta || {};
-
-    // Convert UTC timestamps to JST (UTC+9) for lightweight-charts display
-    const JST_OFFSET = 9 * 60 * 60; // +9 hours in seconds
-    let chartData = timestamps
-      .map((t: number, i: number) => ({
-        time: t + JST_OFFSET,
-        value: quotes.close?.[i] ?? null,
-      }))
-      .filter((d: { time: number; value: number | null }) => d.value !== null);
-
-    // 1Dの場合、最新営業日のデータのみにフィルタリング
-    if (range === "1d" && chartData.length > 0) {
-      const latestTimestamp = timestamps[timestamps.length - 1];
-      const latestDate = new Date(latestTimestamp * 1000);
-      const latestDay = latestDate.toDateString();
-      const filteredData = chartData.filter(
-        (d) => new Date((d.time - JST_OFFSET) * 1000).toDateString() === latestDay
-      );
-      // フィルタ後3件以上あればそれを使用、なければ全データを返す
-      if (filteredData.length >= 3) {
-        chartData = filteredData;
-      }
-    }
-
-    // データが5件未満の場合、期間を延長して再取得
-    if (chartData.length < 5 && range === "1d") {
-      const fallbackUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1mo`;
-      const fallbackRes = await fetch(fallbackUrl, {
-        headers: { "User-Agent": "Mozilla/5.0" },
-        signal: AbortSignal.timeout(8000),
+      return Response.json({
+        chartData: [],
+        prevClose: null,
+        currentPrice: null,
+        changePercent: null,
+        currency: null,
       });
-      if (fallbackRes.ok) {
-        const fallbackData = await fallbackRes.json();
-        const fallbackResult = fallbackData?.chart?.result?.[0];
-        if (fallbackResult) {
-          const fbTimestamps: number[] = fallbackResult.timestamp || [];
-          const fbQuotes = fallbackResult.indicators?.quote?.[0] || {};
-          const fbChartData = fbTimestamps
-            .map((t: number, i: number) => ({
-              time: t + JST_OFFSET,
-              value: fbQuotes.close?.[i] ?? null,
-            }))
-            .filter((d: { time: number; value: number | null }) => d.value !== null);
-          if (fbChartData.length > chartData.length) {
-            chartData = fbChartData;
-          }
-        }
-      }
     }
 
-    // previousCloseが前営業日の正確な終値（chartPreviousCloseはrange依存で不正確）
-    const prevClose = meta.previousClose ?? meta.chartPreviousClose ?? null;
-    const currentPrice = meta.regularMarketPrice ?? null;
-    const currency: string = meta.currency ?? "USD";
-
-    let changePercent: number | null = null;
-    if (prevClose && currentPrice) {
-      changePercent = ((currentPrice - prevClose) / prevClose) * 100;
-    }
-
-    return NextResponse.json(
-      { chartData, prevClose, currentPrice, changePercent, currency },
-      {
-        headers: {
-          "Cache-Control": "public, s-maxage=30, stale-while-revalidate=60",
-        },
-      }
-    );
-  } catch {
-    return NextResponse.json({ error: "Fetch failed" }, { status: 500 });
+    return processResult(result);
+  } catch (error) {
+    console.error("Chart API error:", error);
+    return Response.json({
+      chartData: [],
+      prevClose: null,
+      currentPrice: null,
+      changePercent: null,
+      currency: null,
+    });
   }
+}
+
+function processResult(result: YahooResult) {
+  const meta = result.meta;
+  const timestamps = result.timestamp || [];
+  const closes = result.indicators?.quote?.[0]?.close || [];
+
+  const chartData = timestamps
+    .map((t: number, i: number) => ({
+      time: t + 9 * 60 * 60, // UTC→JST
+      value: closes[i],
+    }))
+    .filter(
+      (d): d is { time: number; value: number } =>
+        d.value !== null && d.value !== undefined && !isNaN(d.value)
+    );
+
+  return Response.json({
+    chartData,
+    prevClose: meta.previousClose ?? meta.chartPreviousClose ?? null,
+    currentPrice: meta.regularMarketPrice ?? null,
+    changePercent: meta.regularMarketChangePercent ?? null,
+    currency: meta.currency ?? null,
+  });
 }
